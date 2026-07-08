@@ -116,6 +116,17 @@ async def run(input_dir: str | None = None, output_dir: str | None = None) -> di
         writer.write(v.stem, {k: "A short video clip." for k in STYLE_ORDER},
                      meta={"stage": "placeholder"})
 
+    try:
+        model = await llm.resolve_text_model()
+        log.info("text model resolved: %s", model)
+    except Exception as e:  # noqa: BLE001
+        log.error("no reachable text model: %s", e)
+    try:
+        vision = await llm.check_vision()
+        log.info("vision model resolved: %s", vision)
+    except Exception as e:  # noqa: BLE001
+        log.error("no vision model available: %s", e)
+
     async def guarded(v: Path) -> dict:
         async with clip_sem:
             try:

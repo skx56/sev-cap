@@ -34,7 +34,8 @@ is unmistakable, 1 = you are guessing).
 Captions:
 {captions}
 
-Return ONLY JSON:
+Think briefly if needed, then END your response with one line containing ONLY
+the JSON:
 {{"assignments": [{{"caption": 1, "style": "formal", "confidence": 4}}, ...]}}"""
 
 
@@ -72,7 +73,7 @@ async def blind_lineup(
 
     raw = await llm.chat(
         [{"role": "user", "content": LINEUP_PROMPT.format(captions=numbered)}],
-        temperature=0.0, tag="lineup", max_tokens=400,
+        temperature=0.0, tag="lineup", max_tokens=2000,
     )
     results: dict[str, LineupResult] = {}
     try:

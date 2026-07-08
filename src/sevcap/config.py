@@ -49,7 +49,14 @@ class Settings:
     fallback_vision_model: str = field(
         default_factory=lambda: os.environ.get(
             "SEVCAP_FALLBACK_VISION_MODEL",
-            "accounts/fireworks/models/qwen2p5-vl-32b-instruct",
+            "accounts/fireworks/models/kimi-k2p6",
+        )
+    )
+    # If the primary text model is not deployed on the account running the
+    # container (e.g. Gemma not serverless), all text stages fall back here.
+    fallback_model: str = field(
+        default_factory=lambda: os.environ.get(
+            "SEVCAP_FALLBACK_MODEL", "accounts/fireworks/models/kimi-k2p6"
         )
     )
 

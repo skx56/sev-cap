@@ -37,8 +37,10 @@ other belong in DIFFERENT clusters.
 Statements:
 {statements}
 
-Return ONLY JSON: a list of clusters, each cluster a list of statement numbers.
-Every number must appear in exactly one cluster. Example: [[1,4],[2],[3,5]]"""
+Answer format: think briefly if needed, then END your response with one line
+containing ONLY the JSON — a list of clusters, each cluster a list of
+statement numbers. Every number appears in exactly one cluster.
+Example final line: [[1,4],[2],[3,5]]"""
 
 ENTAIL_PROMPT = """You are a strict natural-language-inference judge.
 
@@ -53,7 +55,8 @@ fact sheet does not state).
 Claims:
 {claims}
 
-Return ONLY JSON: {{"verdicts": [{{"claim": 1, "supported": true}}, ...]}}"""
+Think briefly if needed, then END your response with one line containing ONLY
+the JSON: {{"verdicts": [{{"claim": 1, "supported": true}}, ...]}}"""
 
 
 @dataclass
@@ -119,31 +122,39 @@ async def _cluster_category(
         return reps
 
     statements = "\n".join(f"{i + 1}. {items[group[0]][1]}" for i, group in enumerate(reps))
-    try:
-        raw = await llm.chat(
-            [{"role": "user", "content": CLUSTER_PROMPT.format(statements=statements)}],
-            temperature=0.0, tag="entail-cluster", max_tokens=800,
-        )
-        groups = extract_json(raw)
-        assert isinstance(groups, list)
-        seen: set[int] = set()
-        clusters: list[list[int]] = []
-        for g in groups:
-            merged: list[int] = []
-            for num in g:
-                i = int(num) - 1
-                if 0 <= i < len(reps) and i not in seen:
-                    seen.add(i)
-                    merged.extend(reps[i])
-            if merged:
-                clusters.append(merged)
-        for i in range(len(reps)):  # anything the judge dropped keeps its own cluster
-            if i not in seen:
-                clusters.append(reps[i])
-        return clusters
-    except Exception as e:  # noqa: BLE001
-        log.warning("entailment clustering failed, falling back to lexical: %s", e)
-        return reps
+    for attempt in range(2):
+        try:
+            raw = await llm.chat(
+                [{"role": "user", "content": CLUSTER_PROMPT.format(statements=statements)}],
+                temperature=0.0 if attempt == 0 else 0.3,
+                tag="entail-cluster", max_tokens=6000, cache=attempt == 0,
+                reasoning="low",
+            )
+            groups = extract_json(raw)
+            assert isinstance(groups, list)
+            seen: set[int] = set()
+            clusters: list[list[int]] = []
+            for g in groups:
+                if isinstance(g, int):  # judge emitted a bare number
+                    g = [g]
+                merged: list[int] = []
+                for num in g:
+                    i = int(num) - 1
+                    if 0 <= i < len(reps) and i not in seen:
+                        seen.add(i)
+                        merged.extend(reps[i])
+                if merged:
+                    clusters.append(merged)
+            for i in range(len(reps)):  # anything the judge dropped keeps its own cluster
+                if i not in seen:
+                    clusters.append(reps[i])
+            return clusters
+        except Exception as e:  # noqa: BLE001
+            log.warning(
+                "entailment clustering attempt %d failed: %s", attempt + 1, str(e)[:200]
+            )
+    log.warning("entailment clustering failed twice, falling back to lexical")
+    return reps
 
 
 async def verify_facts(
@@ -177,6 +188,17 @@ async def verify_facts(
             cluster_sizes.append(len(samples))
             (verified if fact.support >= min_support else rejected).append(fact)
 
+    # Adaptive relaxation: a sparse sheet starves the caption generator, so if
+    # strict verification leaves too little material, admit support-2 facts
+    # (still excluding the 1/K singletons that carry the confabulation signal).
+    if len(verified) < 6 and min_support > 2:
+        promoted = [f for f in rejected if f.support >= 2]
+        if promoted:
+            log.info("sparse sheet (%d facts): promoting %d support-2 facts",
+                     len(verified), len(promoted))
+            verified.extend(promoted)
+            rejected = [f for f in rejected if f.support < 2]
+
     total = sum(cluster_sizes) or 1
     entropy = -sum((n / total) * math.log(n / total) for n in cluster_sizes)
     verified.sort(key=lambda f: (-f.support, f.category))
@@ -194,7 +216,7 @@ async def check_grounding(llm: Gemma, fact_sheet: FactSheet, caption: str) -> tu
     claims = "\n".join(f"{i + 1}. {s}" for i, s in enumerate(sentences))
     raw = await llm.chat(
         [{"role": "user", "content": ENTAIL_PROMPT.format(facts=fact_sheet.as_text(), claims=claims)}],
-        temperature=0.0, tag="grounding", max_tokens=600,
+        temperature=0.0, tag="grounding", max_tokens=2000, reasoning="low",
     )
     try:
         verdicts = extract_json(raw).get("verdicts", [])

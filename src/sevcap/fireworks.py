@@ -55,30 +55,49 @@ def _cache_key(model: str, messages: list[dict], kwargs: dict) -> str:
 
 
 def extract_json(text: str) -> Any:
-    """Leniently pull the first JSON object/array out of a model response."""
+    """Leniently pull JSON out of a model response.
+
+    Reasoning models often think out loud before answering, so when several
+    JSON-looking spans exist we prefer the LAST parseable one (the answer).
+    """
     text = text.strip()
-    fence = re.search(r"```(?:json)?\s*(.*?)```", text, re.DOTALL)
-    if fence:
-        text = fence.group(1).strip()
+    fences = re.findall(r"```(?:json)?\s*(.*?)```", text, re.DOTALL)
+    for fenced in reversed(fences):
+        try:
+            return json.loads(fenced.strip())
+        except json.JSONDecodeError:
+            continue
     try:
         return json.loads(text)
     except json.JSONDecodeError:
         pass
+
+    spans: list[tuple[int, int, Any]] = []
     for opener, closer in (("{", "}"), ("[", "]")):
-        start = text.find(opener)
-        if start == -1:
-            continue
-        depth = 0
-        for i in range(start, len(text)):
-            if text[i] == opener:
-                depth += 1
-            elif text[i] == closer:
-                depth -= 1
-                if depth == 0:
-                    try:
-                        return json.loads(text[start : i + 1])
-                    except json.JSONDecodeError:
+        pos = 0
+        while (start := text.find(opener, pos)) != -1:
+            depth = 0
+            end = -1
+            for i in range(start, len(text)):
+                if text[i] == opener:
+                    depth += 1
+                elif text[i] == closer:
+                    depth -= 1
+                    if depth == 0:
+                        end = i
                         break
+            if end == -1:
+                break
+            try:
+                spans.append((start, end, json.loads(text[start : end + 1])))
+            except json.JSONDecodeError:
+                pass
+            pos = start + 1
+    # drop spans nested inside another parseable span, keep the last top-level
+    top = [s for s in spans
+           if not any(o[0] <= s[0] and s[1] <= o[1] and o != s for o in spans)]
+    if top:
+        return max(top, key=lambda s: s[0])[2]
     raise ValueError(f"No parseable JSON in model response: {text[:300]!r}")
 
 
@@ -95,6 +114,30 @@ class Gemma:
         self.usage = Usage()
         self._sem = asyncio.Semaphore(settings.llm_concurrency)
         self._vision_model_resolved: str | None = None
+        self._text_model_resolved: str | None = None
+        self._reasoning_supported: bool | None = None
+
+    async def resolve_text_model(self) -> str:
+        """Pick the first reachable text model (primary, then fallback).
+
+        Keeps Gemma as the default wherever it is deployed, while letting the
+        same container run on accounts where Gemma is not serverless.
+        """
+        if self._text_model_resolved:
+            return self._text_model_resolved
+        for m in (settings.model, settings.fallback_model):
+            try:
+                await self.chat(
+                    [{"role": "user", "content": "Reply with OK."}],
+                    model=m, temperature=0.0, max_tokens=5, tag="resolve", cache=False,
+                )
+                if m != settings.model:
+                    log.warning("primary model %s unreachable; using %s", settings.model, m)
+                self._text_model_resolved = m
+                return m
+            except Exception as e:  # noqa: BLE001
+                log.warning("model %s unreachable: %s", m, str(e)[:120])
+        raise RuntimeError("No reachable text model (primary or fallback)")
 
     # ------------------------------------------------------------------ core
 
@@ -108,11 +151,16 @@ class Gemma:
         seed: int | None = None,
         tag: str = "general",
         cache: bool | None = None,
+        reasoning: str | None = "none",
     ) -> str:
-        model = model or settings.model
+        model = model or self._text_model_resolved or settings.model
         kwargs: dict[str, Any] = {"temperature": temperature, "max_tokens": max_tokens}
         if seed is not None:
             kwargs["seed"] = seed
+        # Reasoning models burn most of the budget thinking; "none"/"low" keeps
+        # judge calls fast and cheap. Silently dropped if the model rejects it.
+        if reasoning and self._reasoning_supported is not False:
+            kwargs["extra_body"] = {"reasoning_effort": reasoning}
 
         use_cache = settings.cache_enabled if cache is None else cache
         key = _cache_key(model, messages, kwargs)
@@ -155,6 +203,11 @@ class Gemma:
                     s in msg for s in ("not support", "unsupported", "invalid", "cannot")
                 ):
                     raise VisionNotSupportedError(str(e)) from e
+                # Model rejects reasoning_effort -> drop it and retry once.
+                if "reasoning" in msg and "extra_body" in kwargs:
+                    self._reasoning_supported = False
+                    kwargs.pop("extra_body", None)
+                    continue
                 # 4xx (except 429) will not fix itself: fail fast.
                 status = getattr(e, "status_code", None)
                 if status is not None and 400 <= status < 500 and status != 429:
@@ -179,6 +232,7 @@ class Gemma:
         seed: int | None = None,
         tag: str = "vision",
         system: str | None = None,
+        reasoning: str | None = "low",
     ) -> str:
         """Vision call that resolves the working VLM once and sticks with it."""
         content: list[dict[str, Any]] = [{"type": "text", "text": prompt}]
@@ -197,7 +251,7 @@ class Gemma:
             else [settings.vision_model, settings.fallback_vision_model]
         )
         last_err: Exception | None = None
-        for m in candidates:
+        for i, m in enumerate(candidates):
             try:
                 out = await self.chat(
                     messages,
@@ -206,11 +260,16 @@ class Gemma:
                     max_tokens=max_tokens,
                     seed=seed,
                     tag=tag,
+                    reasoning=reasoning,
                 )
                 self._vision_model_resolved = m
                 return out
-            except VisionNotSupportedError as e:
-                log.warning("Model %s rejected image input, falling back: %s", m, e)
+            except Exception as e:  # noqa: BLE001
+                # A model that is missing (404) or vision-incapable is a reason
+                # to try the next candidate, not to fail the clip.
+                if i == len(candidates) - 1 and not isinstance(e, VisionNotSupportedError):
+                    raise
+                log.warning("Vision model %s unusable, falling back: %s", m, str(e)[:120])
                 last_err = e
         raise RuntimeError(f"No available vision model accepted image input: {last_err}")
 

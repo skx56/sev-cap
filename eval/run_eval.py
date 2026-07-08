@@ -34,6 +34,7 @@ async def main() -> int:
         await run(args.clips, args.results)
 
     llm = Gemma()
+    await llm.resolve_text_model()
     results_dir = Path(args.results)
     rows = []
     for f in sorted(results_dir.glob("*.json")):

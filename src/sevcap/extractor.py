@@ -34,7 +34,8 @@ Rules:
 - Describe changes over time as events (e.g. "the car stops at a crossing").
 - If text is legible on screen, quote it exactly under on_screen_text.
 
-Return ONLY JSON in exactly this shape:
+Think briefly if needed, then END your response with ONLY a JSON object in
+exactly this shape (no other text after it):
 {{
   "objects": ["..."],
   "actions": ["..."],
@@ -61,6 +62,8 @@ class Extraction:
 
 def _parse(raw: str, sample_id: int) -> Extraction:
     data = extract_json(raw)
+    if isinstance(data, list):  # model emitted a bare list of facts
+        data = {"events": [x for x in data if isinstance(x, str)]}
     if not isinstance(data, dict):
         raise ValueError("extraction response is not a JSON object")
     facts = {cat: [str(x) for x in data.get(cat, []) if str(x).strip()] for cat in CATEGORIES}
@@ -79,7 +82,7 @@ async def extract_facts(
         try:
             raw = await llm.vision_chat(
                 prompt, images, temperature=temperature, seed=1000 + i,
-                tag="extract", system=SYSTEM,
+                tag="extract", system=SYSTEM, max_tokens=4000,
             )
             return _parse(raw, i)
         except Exception as e:  # noqa: BLE001

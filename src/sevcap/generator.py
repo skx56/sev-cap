@@ -36,7 +36,17 @@ Now write ONE caption in the {label} style for the following video.
 VERIFIED FACT SHEET:
 {facts}
 {feedback}
-Respond with the caption text only — no quotes, no preamble, no explanations."""
+Think if you need to, but END your response with a single line of the form:
+CAPTION: <the caption text>"""
+
+
+def _parse_caption(raw: str) -> str:
+    """Take the last CAPTION: line; fall back to the last non-empty line."""
+    lines = [ln.strip() for ln in raw.strip().splitlines() if ln.strip()]
+    for ln in reversed(lines):
+        if ln.upper().startswith("CAPTION:"):
+            return ln[len("CAPTION:"):].strip().strip('"').strip()
+    return (lines[-1] if lines else raw).strip().strip('"').strip()
 
 
 def _format_exemplars(style: StyleConfig) -> str:
@@ -71,11 +81,12 @@ async def generate_caption(
     raw = await llm.chat(
         [{"role": "system", "content": SYSTEM}, {"role": "user", "content": prompt}],
         temperature=style.temperature,
-        max_tokens=200,
+        max_tokens=1500,
         seed=seed,
         tag=f"gen-{style.key}",
+        reasoning="low",
     )
-    return raw.strip().strip('"').strip()
+    return _parse_caption(raw)
 
 
 DRAFT_PROMPT = """These {n} images are keyframes (in order) from one short video clip.
@@ -86,7 +97,8 @@ Write exactly four captions for the clip, one per style:
 3. humorous_tech — a joke built on software/tech culture that maps onto the scene.
 4. humorous_non_tech — everyday observational humor, zero technical vocabulary.
 
-Only describe what is visibly in the frames. Return ONLY JSON:
+Only describe what is visibly in the frames. Think briefly if needed, then END
+your response with one line containing ONLY the JSON:
 {{"formal": "...", "sarcastic": "...", "humorous_tech": "...", "humorous_non_tech": "..."}}"""
 
 
@@ -100,7 +112,7 @@ async def generate_draft(llm: Gemma, images_b64: list[str]) -> dict[str, str]:
 
     raw = await llm.vision_chat(
         DRAFT_PROMPT.format(n=len(images_b64)), images_b64,
-        temperature=0.7, max_tokens=500, tag="draft",
+        temperature=0.7, max_tokens=3000, tag="draft",
     )
     data = extract_json(raw)
     out = {}

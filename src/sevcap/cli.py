@@ -48,6 +48,7 @@ def lineup_test():
 
     async def _test():
         llm = Gemma()
+        await llm.resolve_text_model()
         n_scenarios = len(next(iter(STYLES.values())).exemplars)
         table = Table(title="Exemplar blind-lineup results")
         table.add_column("Scenario")
@@ -84,6 +85,7 @@ def facts(
 
     async def _facts():
         llm = Gemma()
+        await llm.resolve_text_model()
         frames = sample_keyframes(video, settings.n_frames)
         console.print(f"Sampled {len(frames)} keyframes")
         extractions = await extract_facts(llm, frames, k=k or settings.k_samples)
