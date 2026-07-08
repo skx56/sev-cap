@@ -155,6 +155,10 @@ class Gemma:
                     s in msg for s in ("not support", "unsupported", "invalid", "cannot")
                 ):
                     raise VisionNotSupportedError(str(e)) from e
+                # 4xx (except 429) will not fix itself: fail fast.
+                status = getattr(e, "status_code", None)
+                if status is not None and 400 <= status < 500 and status != 429:
+                    raise
                 if not isinstance(e, RETRIABLE) and "429" not in msg and "500" not in msg:
                     if attempt >= 1:
                         raise

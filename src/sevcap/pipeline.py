@@ -110,6 +110,12 @@ async def run(input_dir: str | None = None, output_dir: str | None = None) -> di
     deadline = Deadline(settings.time_budget_s)
     clip_sem = asyncio.Semaphore(settings.clip_concurrency)
 
+    # OUTPUT_MISSING defense, layer 0: every clip has (placeholder) output on
+    # disk before any processing starts; everything after only upgrades it.
+    for v in videos:
+        writer.write(v.stem, {k: "A short video clip." for k in STYLE_ORDER},
+                     meta={"stage": "placeholder"})
+
     async def guarded(v: Path) -> dict:
         async with clip_sem:
             try:
