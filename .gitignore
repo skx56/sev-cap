@@ -1,0 +1,13 @@
+__pycache__/
+*.pyc
+*.egg-info/
+.venv/
+.env
+.sevcap_cache/
+results/
+clips/*
+!clips/.gitkeep
+eval/out/
+.pytest_cache/
+dist/
+build/

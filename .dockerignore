@@ -1,0 +1,12 @@
+.git
+.venv
+.env
+.sevcap_cache
+results
+clips
+eval/out
+tests
+__pycache__
+*.egg-info
+.pytest_cache
+.github
