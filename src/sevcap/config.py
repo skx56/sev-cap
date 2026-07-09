@@ -70,10 +70,10 @@ class Settings:
     # keeps the fact sheet from starving; support=3 would require unanimous
     # samples and is unrealistically strict under any per-call failure rate.
     min_support: int = field(default_factory=lambda: _int("SEVCAP_MIN_SUPPORT", 2))
-    # Fewer images per vision call cuts cost/latency without losing story
-    # coverage for ~30-90s clips. 4 is enough for short clips and keeps Kimi
-    # multi-image calls under the request-timeout cliff we hit at 6–10.
-    n_frames: int = field(default_factory=lambda: _int("SEVCAP_FRAMES", 4))
+    # 6 frames: enough story coverage for ~30-90s clips. With reasoning=none
+    # and serial clip concurrency, Kimi multi-image calls finish reliably
+    # (the old timeout cliff was mostly reasoning-token bloat, not frame count).
+    n_frames: int = field(default_factory=lambda: _int("SEVCAP_FRAMES", 6))
     extract_temperature: float = field(default_factory=lambda: _float("SEVCAP_EXTRACT_TEMP", 0.55))
     time_budget_s: float = field(default_factory=lambda: _float("SEVCAP_TIME_BUDGET", 1800.0))
     # One refine round buys most of the grounding/style-lineup win per clip at
