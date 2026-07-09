@@ -273,9 +273,10 @@ class Gemma:
                 if status is not None and 400 <= status < 500 and status not in (401, 429):
                     raise
                 if not isinstance(e, RETRIABLE) and "429" not in msg and "500" not in msg:
-                    # Degenerate decoding loops get extra budget since each
-                    # retry now uses a genuinely different seed (see above).
-                    max_attempt = 3 if isinstance(e, DegenerateOutputError) else 1
+                    # One reseeded retry for a decoding loop; if the model is
+                    # still looping after that, stop burning time here and
+                    # let vision_chat's candidate fallback take over instead.
+                    max_attempt = 1
                     if attempt >= max_attempt:
                         raise
                 log.warning("LLM call failed (attempt %d): %s", attempt + 1, str(e)[:150])
@@ -298,7 +299,15 @@ class Gemma:
         reasoning: str | None = "low",
         cache: bool | None = None,
     ) -> str:
-        """Vision call that resolves the working VLM once and sticks with it."""
+        """Vision call with per-call fallback: a model that degenerates on one
+        call does not get permanently trusted for the rest of the run.
+
+        Earlier this locked to whichever model answered check_vision() once
+        and never reconsidered — so a model that is reachable but unstable
+        (e.g. decoding loops on heavy multi-image prompts) kept getting
+        retried in isolation for the whole run instead of ever falling
+        through to the working alternative.
+        """
         content: list[dict[str, Any]] = [{"type": "text", "text": prompt}]
         for b64 in image_b64_list:
             content.append(
@@ -309,11 +318,15 @@ class Gemma:
             messages.append({"role": "system", "content": system})
         messages.append({"role": "user", "content": content})
 
-        candidates = (
-            [self._vision_model_resolved]
-            if self._vision_model_resolved
-            else [settings.vision_model, settings.fallback_vision_model]
-        )
+        # Try whichever model most recently worked first (cheap optimization),
+        # but always keep the other candidate available this call too.
+        primary = self._vision_model_resolved or settings.vision_model
+        candidates = [primary]
+        if settings.fallback_vision_model and settings.fallback_vision_model != primary:
+            candidates.append(settings.fallback_vision_model)
+        if primary != settings.vision_model and settings.vision_model not in candidates:
+            candidates.append(settings.vision_model)
+
         last_err: Exception | None = None
         for i, m in enumerate(candidates):
             try:
@@ -330,11 +343,16 @@ class Gemma:
                 self._vision_model_resolved = m
                 return out
             except Exception as e:  # noqa: BLE001
-                # A model that is missing (404) or vision-incapable is a reason
-                # to try the next candidate, not to fail the clip.
-                if i == len(candidates) - 1 and not isinstance(e, VisionNotSupportedError):
+                is_last = i == len(candidates) - 1
+                # Only a hard "no image support" failure is worth giving up
+                # on immediately without trying remaining candidates.
+                if isinstance(e, VisionNotSupportedError) and not is_last:
+                    log.warning("Vision model %s rejects images, trying next: %s", m, str(e)[:120])
+                    last_err = e
+                    continue
+                if is_last:
                     raise
-                log.warning("Vision model %s unusable, falling back: %s", m, str(e)[:120])
+                log.warning("Vision model %s unusable this call, falling back: %s", m, str(e)[:120])
                 last_err = e
         raise RuntimeError(f"No available vision model accepted image input: {last_err}")
 
