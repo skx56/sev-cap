@@ -149,8 +149,9 @@ async def generate_draft(llm: Gemma, images_b64: list[str]) -> dict[str, str]:
             out = {}
             for key in ("formal", "sarcastic", "humorous_tech", "humorous_non_tech"):
                 val = str(data.get(key, "")).strip()
-                if not val:
-                    raise ValueError(f"draft missing style {key}")
+                # Reject template echoes ("...") and non-captions outright.
+                if len(val) < 15 or val.strip(".").strip() == "":
+                    raise ValueError(f"draft style {key} is empty or template junk: {val!r}")
                 out[key] = val
             return out
         except Exception as e:  # noqa: BLE001

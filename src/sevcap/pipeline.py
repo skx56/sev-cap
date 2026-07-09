@@ -157,14 +157,33 @@ async def run(input_dir: str | None = None, output_dir: str | None = None) -> di
                              meta={"stage": "error", "error": str(e)})
                 return {"clip": v.stem, "stage": "error", "error": str(e)}
 
+    async def one_pass(targets: list[Path]) -> list[dict]:
+        return await asyncio.gather(*(guarded(v) for v in targets))
+
+    # Repair loop: transient provider outages (rate-limit storms, spurious
+    # 401 windows) can sink a whole pass. While budget remains, re-attempt
+    # every clip that did not reach sev-verified.
+    best: dict[str, dict] = {v.stem: {"clip": v.stem, "stage": "pending"} for v in videos}
+    targets = list(videos)
     try:
-        results = await asyncio.wait_for(
-            asyncio.gather(*(guarded(v) for v in videos)),
-            timeout=max(deadline.remaining(), 1.0),
-        )
+        for round_no in range(3):
+            round_results = await asyncio.wait_for(
+                one_pass(targets), timeout=max(deadline.remaining(), 1.0)
+            )
+            for r in round_results:
+                clip = r.get("clip")
+                if clip and (r.get("stage") == "sev-verified"
+                             or best[clip].get("stage") != "sev-verified"):
+                    best[clip] = r
+            targets = [v for v in videos if best[v.stem].get("stage") != "sev-verified"]
+            if not targets or deadline.expired(reserve=180.0):
+                break
+            log.warning("repair round %d: retrying %s",
+                        round_no + 1, [v.stem for v in targets])
+            await asyncio.sleep(min(60.0, max(deadline.remaining() * 0.05, 5.0)))
     except asyncio.TimeoutError:
-        log.warning("global time budget hit; drafts already on disk")
-        results = [{"stage": "timeout"}]
+        log.warning("global time budget hit; best output already on disk")
+    results = list(best.values())
 
     summary = {
         "clips": len(videos),
