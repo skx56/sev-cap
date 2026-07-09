@@ -92,7 +92,14 @@ async def process_clip(
             captions[k] = str(res).strip() if ok else draft[k]
 
         outcomes = await refine_captions(llm, fact_sheet, captions)
-        final = {k: (outcomes[k].final.text.strip() or draft[k]) for k in STYLE_ORDER}
+        final: dict[str, str] = {}
+        for k in STYLE_ORDER:
+            best = outcomes[k].final
+            text = best.text.strip()
+            # A caption that never passed grounding, or reads like a template
+            # artifact, must not beat the vision-grounded draft.
+            usable = text and best.grounded and not text.startswith(("[", "("))
+            final[k] = text if usable else draft[k]
         meta = {
             "stage": "sev-verified",
             "keyframes": len(frames),
