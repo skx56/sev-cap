@@ -16,6 +16,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import os
 import time
 from dataclasses import dataclass
 from pathlib import Path
@@ -217,23 +218,29 @@ async def run(input_dir: str | None = None, output_dir: str | None = None) -> di
     except Exception as e:  # noqa: BLE001
         log.error("no vision model available: %s", e)
 
-    # ---- Phase 1 for EVERY clip first, unthrottled by clip_concurrency.
-    # This is the OUTPUT_MISSING/starvation defense: previously Phase 1+2 ran
-    # together per clip under a clip_concurrency semaphore, so if the first
-    # few clips' Phase 2 got stuck retrying a degenerating model, later clips
-    # never even got a chance to run their (cheap, fast) draft — a real run
-    # left 2/7 clips at bare "placeholder" this way. Drafts are one call each
-    # and queue naturally behind the LLM client's own concurrency limit, so
-    # running all of them upfront costs little and guarantees every clip has
-    # real (non-placeholder) output within roughly one draft-call's latency.
+    # ---- Phase 1 for EVERY clip first (before any Phase 2). Bounded by the
+    # same clip_concurrency semaphore AND a hard per-draft timeout so a
+    # single slow/timeouting draft call cannot pin the whole batch forever
+    # (observed under Kimi serverless load: 2/7 drafts hung while 5 finished).
+    # Clips that miss the draft timeout keep their placeholder and are still
+    # eligible for a later repair-round draft+upgrade if budget remains.
+    draft_timeout_s = float(os.environ.get("SEVCAP_DRAFT_TIMEOUT", "90"))
+
     async def guarded_draft(v: Path) -> tuple[Path, DraftResult | None]:
-        try:
-            return v, await draft_phase(llm, v, writer)
-        except Exception as e:  # noqa: BLE001
-            log.error("[%s] draft phase failed entirely: %s", v.stem, e)
-            writer.write(v.stem, {k: "A short video clip." for k in STYLE_ORDER},
-                         meta={"stage": "error", "error": str(e)})
-            return v, None
+        async with clip_sem:
+            try:
+                return v, await asyncio.wait_for(
+                    draft_phase(llm, v, writer), timeout=draft_timeout_s
+                )
+            except asyncio.TimeoutError:
+                log.warning("[%s] draft timed out after %.0fs; keeping placeholder",
+                            v.stem, draft_timeout_s)
+                return v, None
+            except Exception as e:  # noqa: BLE001
+                log.error("[%s] draft phase failed entirely: %s", v.stem, e)
+                writer.write(v.stem, {k: "A short video clip." for k in STYLE_ORDER},
+                             meta={"stage": "error", "error": str(e)})
+                return v, None
 
     draft_pairs = await asyncio.gather(*(guarded_draft(v) for v in videos))
     drafts: dict[Path, DraftResult] = {v: d for v, d in draft_pairs if d is not None}
@@ -261,12 +268,26 @@ async def run(input_dir: str | None = None, output_dir: str | None = None) -> di
 
     # Repair loop: transient provider outages (rate-limit storms, spurious
     # 401 windows) can sink a whole pass. While budget remains, re-attempt
-    # every clip that did not reach sev-verified.
-    targets = [v for v in videos if v in drafts]
+    # every clip that did not reach sev-verified — including clips whose
+    # first draft timed out (re-run draft, then upgrade).
+    targets = [v for v in videos if best[v.stem].get("stage") != "sev-verified"]
     for round_no in range(3):
         if not targets or deadline.expired(reserve=60.0):
             break
-        round_results = await one_pass(targets)
+        # Re-draft any clip that never got a DraftResult (timeout/error).
+        missing = [v for v in targets if v not in drafts]
+        if missing:
+            log.warning("repair round %d: re-drafting %s",
+                        round_no + 1, [v.stem for v in missing])
+            redraft = await asyncio.gather(*(guarded_draft(v) for v in missing))
+            for v, d in redraft:
+                if d is not None:
+                    drafts[v] = d
+                    best[v.stem] = {"clip": v.stem, "stage": "draft"}
+        upgrade_targets = [v for v in targets if v in drafts]
+        if not upgrade_targets:
+            break
+        round_results = await one_pass(upgrade_targets)
         for r in round_results:
             clip = r.get("clip")
             if clip and (r.get("stage") == "sev-verified"
