@@ -11,6 +11,12 @@ COPY pyproject.toml README.md ./
 COPY src ./src
 RUN pip install --no-cache-dir .
 
+# Bake the Whisper weights into the image at build time so the harness never
+# needs extra network access at run time to transcribe audio (Fireworks
+# deprecated its hosted Whisper endpoint, so this runs fully local/CPU).
+ENV SEVCAP_WHISPER_CACHE_DIR=/app/.whisper_cache
+RUN python -c "from faster_whisper import WhisperModel; WhisperModel('base', device='cpu', compute_type='int8', download_root='/app/.whisper_cache')"
+
 # Defaults the harness can override with -e; the key is NEVER baked in.
 # Primary model is our dedicated Gemma 4 31B deployment (scale-to-zero);
 # if the scoring key cannot reach it, the client falls back to Kimi K2p6.

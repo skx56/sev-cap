@@ -25,11 +25,11 @@ SYSTEM = (
 )
 
 PROMPT = """These {n} images are keyframes sampled in chronological order from ONE short video clip (timestamps: {ts}).
-
+{audio_block}
 List the SALIENT atomic facts about the video. An atomic fact is ONE short, self-contained, verifiable statement (max ~12 words), e.g. "a man in a red jacket rides a bicycle".
 
 Rules:
-- Only include what is clearly visible. If unsure, leave it out.
+- Only include what is clearly visible or clearly said. If unsure, leave it out.
 - Prioritize the STORY: what happens, in order, goes under events (3-6 events).
 - At most 6 facts per category — the most important ones only, no minor
   background details (individual leaves, rocks, lighting nuances).
@@ -37,6 +37,9 @@ Rules:
   "the small creature").
 - No speculation about names, brands, emotions, or off-screen events.
 - If text is legible on screen, quote it exactly under on_screen_text.
+- If the audio transcript contains a distinct spoken line, you may include ONE
+  atomic fact under "events" like: the character says "<short quote>" — only
+  if the transcript above is non-empty.
 
 Think briefly if needed, then END your response with ONLY a JSON object in
 exactly this shape (no other text after it):
@@ -47,6 +50,8 @@ exactly this shape (no other text after it):
   "events": ["..."],
   "on_screen_text": ["..."]
 }}"""
+
+_AUDIO_BLOCK = '\nAudio transcript of this clip (may be empty or imperfect ASR output): "{transcript}"\n'
 
 
 @dataclass
@@ -91,12 +96,22 @@ def _parse(raw: str, sample_id: int) -> Extraction:
 
 
 async def extract_facts(
-    llm: Gemma, frames: list[Keyframe], k: int = 5, temperature: float = 0.7
+    llm: Gemma,
+    frames: list[Keyframe],
+    k: int = 5,
+    temperature: float = 0.7,
+    transcript: str = "",
 ) -> list[Extraction]:
-    """Run K independent extractions concurrently; tolerate partial failures."""
+    """Run K independent extractions concurrently; tolerate partial failures.
+
+    `transcript` (if any) is identical across all K samples, so any fact it
+    grounds shows up consistently and earns its verification the normal way —
+    audio is a second evidence channel into Stage 1, not a bypass around it.
+    """
     images = [f.b64() for f in frames]
     ts = ", ".join(f"{f.t:.0f}s" for f in frames)
-    prompt = PROMPT.format(n=len(frames), ts=ts)
+    audio_block = _AUDIO_BLOCK.format(transcript=transcript) if transcript else ""
+    prompt = PROMPT.format(n=len(frames), ts=ts, audio_block=audio_block)
 
     async def one(i: int) -> Extraction | None:
         for attempt in range(2):

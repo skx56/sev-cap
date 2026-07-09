@@ -77,6 +77,7 @@ def facts(
     k: int = typer.Option(None, "--k", help="Number of extraction samples"),
 ):
     """Debug: run Stage 1 + semantic-entropy verification on one clip."""
+    from .audio import transcribe
     from .config import settings
     from .entropy import verify_facts
     from .extractor import extract_facts
@@ -88,7 +89,12 @@ def facts(
         await llm.resolve_text_model()
         frames = sample_keyframes(video, settings.n_frames)
         console.print(f"Sampled {len(frames)} keyframes")
-        extractions = await extract_facts(llm, frames, k=k or settings.k_samples)
+        transcript = transcribe(video)
+        if transcript:
+            console.print(f"Audio transcript: {transcript!r}")
+        extractions = await extract_facts(
+            llm, frames, k=k or settings.k_samples, transcript=transcript
+        )
         sheet = await verify_facts(llm, extractions, settings.min_support)
         console.print_json(json.dumps(sheet.report()))
 

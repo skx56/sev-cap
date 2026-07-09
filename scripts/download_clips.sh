@@ -14,9 +14,11 @@ fetch() { # url dest
 
 trim() { # src start dur dest
   [ -s "$4" ] && { echo "skip $(basename "$4") (exists)"; return 0; }
+  # Keep audio (AAC) when the source has a track: dialogue clips feed the
+  # Whisper transcription stage, not just the vision extractor.
   ffmpeg -hide_banner -loglevel error -ss "$2" -t "$3" -i "$1" \
     -vf "scale=trunc(iw/2)*2:trunc(ih/2)*2" \
-    -c:v libx264 -preset veryfast -crf 26 -an -y "$4"
+    -c:v libx264 -preset veryfast -crf 26 -c:a aac -b:a 96k -y "$4"
   echo "made $(basename "$4")"
 }
 

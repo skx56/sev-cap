@@ -109,19 +109,24 @@ async def generate_caption(
 
 
 DRAFT_PROMPT = """These {n} images are keyframes (in order) from one short video clip.
-
+{audio_block}
 Write exactly four captions for the clip, one per style:
 1. formal — precise, neutral, professional; no humor, no contractions.
 2. sarcastic — dry deadpan irony with a clear target; no exclamation marks.
 3. humorous_tech — a joke built on software/tech culture that maps onto the scene.
 4. humorous_non_tech — everyday observational humor, zero technical vocabulary.
 
-Only describe what is visibly in the frames. Think briefly if needed, then END
-your response with one line containing ONLY the JSON:
+Only describe what is visibly in the frames or clearly audible in the
+transcript (if given). Think briefly if needed, then END your response with
+one line containing ONLY the JSON:
 {{"formal": "...", "sarcastic": "...", "humorous_tech": "...", "humorous_non_tech": "..."}}"""
 
+_DRAFT_AUDIO_BLOCK = '\nAudio transcript of this clip (may be empty or imperfect ASR output): "{transcript}"\n'
 
-async def generate_draft(llm: Gemma, images_b64: list[str]) -> dict[str, str]:
+
+async def generate_draft(
+    llm: Gemma, images_b64: list[str], transcript: str = ""
+) -> dict[str, str]:
     """Fast single-pass draft of all 4 styles straight from frames.
 
     This is the anytime-algorithm safety net: it is written to disk first so a
@@ -132,13 +137,14 @@ async def generate_draft(llm: Gemma, images_b64: list[str]) -> dict[str, str]:
 
     from .fireworks import extract_json
 
+    audio_block = _DRAFT_AUDIO_BLOCK.format(transcript=transcript) if transcript else ""
     last_err: Exception | None = None
     for attempt in range(3):
         try:
             # Only the first attempt may read the cache: a cached malformed
             # response must never be replayed into every retry.
             raw = await llm.vision_chat(
-                DRAFT_PROMPT.format(n=len(images_b64)), images_b64,
+                DRAFT_PROMPT.format(n=len(images_b64), audio_block=audio_block), images_b64,
                 temperature=0.7, max_tokens=6000, tag="draft",
                 seed=None if attempt == 0 else 500 + attempt,
                 cache=attempt == 0,

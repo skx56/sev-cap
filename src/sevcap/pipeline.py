@@ -19,6 +19,7 @@ import logging
 import time
 from pathlib import Path
 
+from .audio import transcribe
 from .config import settings
 from .entropy import verify_facts
 from .extractor import extract_facts
@@ -49,14 +50,18 @@ async def process_clip(
 ) -> dict:
     clip_id = video.stem
     log.info("[%s] sampling keyframes", clip_id)
-    frames = await asyncio.to_thread(sample_keyframes, str(video), settings.n_frames)
+    frames_task = asyncio.to_thread(sample_keyframes, str(video), settings.n_frames)
+    audio_task = asyncio.to_thread(transcribe, str(video))
+    frames, transcript = await asyncio.gather(frames_task, audio_task)
     images = [f.b64() for f in frames]
+    if transcript:
+        log.info("[%s] audio transcript (%d chars): %s", clip_id, len(transcript), transcript[:100])
 
     # ---- Phase 1: draft written immediately (TIMEOUT/OUTPUT_MISSING defense)
     draft = None
     for attempt in range(2):
         try:
-            draft = await generate_draft(llm, images)
+            draft = await generate_draft(llm, images, transcript=transcript)
             break
         except Exception as e:  # noqa: BLE001
             log.warning("[%s] draft attempt %d failed: %s", clip_id, attempt + 1, str(e)[:150])
@@ -70,7 +75,7 @@ async def process_clip(
 
     # ---- Phase 2: full SEV upgrade
     try:
-        extractions = await extract_facts(llm, frames, k=settings.k_samples)
+        extractions = await extract_facts(llm, frames, k=settings.k_samples, transcript=transcript)
         if len(extractions) < 3:
             # Semantic entropy needs independent samples to agree; with fewer
             # than 3 there is no consensus signal and "verification" is noise.
