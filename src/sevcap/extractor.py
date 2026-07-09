@@ -116,8 +116,11 @@ async def extract_facts(
     async def one(i: int) -> Extraction | None:
         for attempt in range(2):
             try:
+                # A fixed seed reproduces a bad sample deterministically, so
+                # a retry must resample with a different seed to be useful.
+                seed = 1000 + i if attempt == 0 else 9000 + i * 97 + attempt
                 raw = await llm.vision_chat(
-                    prompt, images, temperature=temperature, seed=1000 + i,
+                    prompt, images, temperature=temperature, seed=seed,
                     tag="extract", system=SYSTEM, max_tokens=6000,
                     cache=attempt == 0,  # never replay a cached bad response
                 )

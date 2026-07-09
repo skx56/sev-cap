@@ -13,6 +13,7 @@ import json
 import logging
 import os
 import re
+from collections import Counter
 from dataclasses import dataclass, field
 from typing import Any
 
@@ -47,6 +48,51 @@ class Usage:
 
 class VisionNotSupportedError(RuntimeError):
     """Raised when the model rejects image input, triggering VLM fallback."""
+
+
+class DegenerateOutputError(RuntimeError):
+    """Raised when the model falls into a decoding repetition loop.
+
+    Observed occasionally on gemma-4-26b-a4b-it at temperature>=0.7 ("too
+    many too many too many..."). The API call itself succeeds (200 OK), so
+    this must be caught after the fact and treated as a retriable failure —
+    never cached, never trusted.
+    """
+
+
+def _is_degenerate(text: str) -> bool:
+    """Cheap repetition-loop detector, scanned over the whole response.
+
+    Catches shapes of decoding loop seen on this checkpoint: a single
+    token/word repeated back-to-back many times ("de-identified de-identified
+    ..."), a short phrase cycling ("too many too many too many..."), and a
+    hyphen-chained repeat ("top-level-level-level-level-level...").
+    """
+    words = re.split(r"[\s-]+", text)
+    if len(words) < 12:
+        return False
+    max_run = run = 1
+    for i in range(1, len(words)):
+        if words[i] == words[i - 1]:
+            run += 1
+            max_run = max(max_run, run)
+        else:
+            run = 1
+    if max_run >= 6:
+        return True
+    grams = [" ".join(words[i : i + 3]) for i in range(len(words) - 2)]
+    if not grams:
+        return False
+    top = Counter(grams).most_common(1)[0][1]
+    return top / len(grams) > 0.15
+
+
+def _has_parseable_json_tail(text: str) -> bool:
+    try:
+        extract_json(text)
+        return True
+    except Exception:  # noqa: BLE001
+        return False
 
 
 def _cache_key(model: str, messages: list[dict], kwargs: dict) -> str:
@@ -182,6 +228,14 @@ class Gemma:
                         model=model, messages=messages, **kwargs
                     )
                 content = resp.choices[0].message.content or ""
+                # Only treat repetition as fatal if there is no salvageable
+                # JSON at all — a verbose "thinking" preamble can legitimately
+                # repeat a phrase while still ending in a perfectly good
+                # answer, and rejecting those hurts more than it helps.
+                if _is_degenerate(content) and not _has_parseable_json_tail(content):
+                    raise DegenerateOutputError(
+                        f"repetition loop with no recoverable JSON (tail: {content[-80:]!r})"
+                    )
                 self.usage.calls += 1
                 self.usage.per_tag[tag] = self.usage.per_tag.get(tag, 0) + 1
                 if resp.usage:
@@ -208,6 +262,10 @@ class Gemma:
                     self._reasoning_supported = False
                     kwargs.pop("extra_body", None)
                     continue
+                # A fixed seed reproduces a decoding loop deterministically;
+                # retrying identically would just hit the same loop again.
+                if isinstance(e, DegenerateOutputError) and "seed" in kwargs:
+                    kwargs["seed"] = kwargs["seed"] + 7919 * (attempt + 1)
                 # 4xx will not fix itself, except 429 (rate limit) and 401:
                 # Fireworks intermittently returns spurious 401s under load,
                 # so give auth errors the full backoff before giving up.
@@ -215,7 +273,10 @@ class Gemma:
                 if status is not None and 400 <= status < 500 and status not in (401, 429):
                     raise
                 if not isinstance(e, RETRIABLE) and "429" not in msg and "500" not in msg:
-                    if attempt >= 1:
+                    # Degenerate decoding loops get extra budget since each
+                    # retry now uses a genuinely different seed (see above).
+                    max_attempt = 3 if isinstance(e, DegenerateOutputError) else 1
+                    if attempt >= max_attempt:
                         raise
                 log.warning("LLM call failed (attempt %d): %s", attempt + 1, str(e)[:150])
                 await asyncio.sleep(delay)
