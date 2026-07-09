@@ -40,8 +40,22 @@ the JSON:
 async def judge_clip(llm: Gemma, video: str, captions: dict[str, str]) -> dict:
     frames = sample_keyframes(video, 8)
     images = [f.b64() for f in frames]
-    raw = await llm.vision_chat(
-        JUDGE_PROMPT.format(n=len(images), **captions),
-        images, temperature=0.0, max_tokens=6000, tag="eval-judge",
-    )
-    return extract_json(raw).get("scores", {})
+    prompt = JUDGE_PROMPT.format(n=len(images), **captions)
+    last_err: Exception | None = None
+    for attempt in range(3):
+        try:
+            raw = await llm.vision_chat(
+                prompt, images, temperature=0.0 if attempt == 0 else 0.3,
+                max_tokens=6000, tag="eval-judge",
+                # "low" reasoning can produce a long "thought" preamble that
+                # eats the token budget before reaching the JSON; "none"
+                # skips straight to the answer. Bypass cache on retry so a
+                # truncated response never replays.
+                reasoning="none",
+                seed=None if attempt == 0 else 900 + attempt,
+                cache=attempt == 0,
+            )
+            return extract_json(raw).get("scores", {})
+        except Exception as e:  # noqa: BLE001
+            last_err = e
+    raise RuntimeError(f"judge failed after retries: {last_err}")
