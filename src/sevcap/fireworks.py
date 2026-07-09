@@ -208,9 +208,11 @@ class Gemma:
                     self._reasoning_supported = False
                     kwargs.pop("extra_body", None)
                     continue
-                # 4xx (except 429) will not fix itself: fail fast.
+                # 4xx will not fix itself, except 429 (rate limit) and 401:
+                # Fireworks intermittently returns spurious 401s under load,
+                # so give auth errors the full backoff before giving up.
                 status = getattr(e, "status_code", None)
-                if status is not None and 400 <= status < 500 and status != 429:
+                if status is not None and 400 <= status < 500 and status not in (401, 429):
                     raise
                 if not isinstance(e, RETRIABLE) and "429" not in msg and "500" not in msg:
                     if attempt >= 1:
