@@ -53,10 +53,14 @@ async def process_clip(
     images = [f.b64() for f in frames]
 
     # ---- Phase 1: draft written immediately (TIMEOUT/OUTPUT_MISSING defense)
-    try:
-        draft = await generate_draft(llm, images)
-    except Exception as e:  # noqa: BLE001
-        log.warning("[%s] draft failed (%s); writing placeholder", clip_id, e)
+    draft = None
+    for attempt in range(2):
+        try:
+            draft = await generate_draft(llm, images)
+            break
+        except Exception as e:  # noqa: BLE001
+            log.warning("[%s] draft attempt %d failed: %s", clip_id, attempt + 1, str(e)[:150])
+    if draft is None:
         draft = {k: "A short video clip." for k in STYLE_ORDER}
     writer.write(clip_id, draft, meta={"stage": "draft", "keyframes": len(frames)})
 
@@ -68,6 +72,10 @@ async def process_clip(
     try:
         extractions = await extract_facts(llm, frames, k=settings.k_samples)
         fact_sheet = await verify_facts(llm, extractions, settings.min_support)
+        if not fact_sheet.verified:
+            # Never caption from an empty sheet (the generator would write
+            # meta-captions about missing facts). Keep the visual draft.
+            raise RuntimeError("empty fact sheet after verification")
 
         captions: dict[str, str] = {}
         results = await asyncio.gather(
@@ -76,10 +84,11 @@ async def process_clip(
             return_exceptions=True,
         )
         for k, res in zip(STYLE_ORDER, results):
-            captions[k] = draft[k] if isinstance(res, Exception) else res
+            ok = not isinstance(res, Exception) and str(res).strip()
+            captions[k] = str(res).strip() if ok else draft[k]
 
         outcomes = await refine_captions(llm, fact_sheet, captions)
-        final = {k: outcomes[k].final.text for k in STYLE_ORDER}
+        final = {k: (outcomes[k].final.text.strip() or draft[k]) for k in STYLE_ORDER}
         meta = {
             "stage": "sev-verified",
             "keyframes": len(frames),

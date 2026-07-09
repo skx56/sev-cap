@@ -175,7 +175,7 @@ class Gemma:
 
         delay = 2.0
         last_err: Exception | None = None
-        for attempt in range(5):
+        for attempt in range(8):  # 429 storms need patience, not failure
             try:
                 async with self._sem:
                     resp = await self.client.chat.completions.create(
@@ -215,9 +215,9 @@ class Gemma:
                 if not isinstance(e, RETRIABLE) and "429" not in msg and "500" not in msg:
                     if attempt >= 1:
                         raise
-                log.warning("LLM call failed (attempt %d): %s", attempt + 1, e)
+                log.warning("LLM call failed (attempt %d): %s", attempt + 1, str(e)[:150])
                 await asyncio.sleep(delay)
-                delay = min(delay * 2, 30)
+                delay = min(delay * 2, 60)
         raise RuntimeError(f"LLM call failed after retries: {last_err}")
 
     # ---------------------------------------------------------------- vision

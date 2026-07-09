@@ -111,17 +111,32 @@ async def generate_draft(llm: Gemma, images_b64: list[str]) -> dict[str, str]:
     """Fast single-pass draft of all 4 styles straight from frames.
 
     This is the anytime-algorithm safety net: it is written to disk first so a
-    harness timeout can never leave a clip without output.
+    harness timeout can never leave a clip without output. Because everything
+    downstream degrades to it, the draft itself retries hard.
     """
+    import asyncio
+
     from .fireworks import extract_json
 
-    raw = await llm.vision_chat(
-        DRAFT_PROMPT.format(n=len(images_b64)), images_b64,
-        temperature=0.7, max_tokens=3000, tag="draft",
-    )
-    data = extract_json(raw)
-    out = {}
-    for key in ("formal", "sarcastic", "humorous_tech", "humorous_non_tech"):
-        val = data.get(key, "") if isinstance(data, dict) else ""
-        out[key] = str(val).strip() or "A short video clip."
-    return out
+    last_err: Exception | None = None
+    for attempt in range(3):
+        try:
+            raw = await llm.vision_chat(
+                DRAFT_PROMPT.format(n=len(images_b64)), images_b64,
+                temperature=0.7, max_tokens=3000, tag="draft",
+                seed=None if attempt == 0 else 500 + attempt,
+            )
+            data = extract_json(raw)
+            if not isinstance(data, dict):
+                raise ValueError("draft response is not a JSON object")
+            out = {}
+            for key in ("formal", "sarcastic", "humorous_tech", "humorous_non_tech"):
+                val = str(data.get(key, "")).strip()
+                if not val:
+                    raise ValueError(f"draft missing style {key}")
+                out[key] = val
+            return out
+        except Exception as e:  # noqa: BLE001
+            last_err = e
+            await asyncio.sleep(2 * (attempt + 1))
+    raise RuntimeError(f"draft generation failed after retries: {last_err}")
