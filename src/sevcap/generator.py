@@ -7,6 +7,8 @@ not survive verification cannot appear in a caption.
 
 from __future__ import annotations
 
+import re
+
 from .entropy import FactSheet
 from .fireworks import Gemma
 from .styles import StyleConfig
@@ -38,6 +40,18 @@ VERIFIED FACT SHEET:
 {feedback}
 Think if you need to, but END your response with a single line of the form:
 CAPTION: <the caption text>"""
+
+
+_META_RE = re.compile(
+    r"\b(fact sheet|verified facts?|awaiting|cannot generate|no facts|not provided)\b", re.I
+)
+
+
+def _reject_meta(caption: str) -> str:
+    """A caption about the captioning process is worse than no caption."""
+    if not caption or caption.startswith(("[", "(")) or _META_RE.search(caption):
+        raise ValueError(f"meta/empty caption rejected: {caption[:80]!r}")
+    return caption
 
 
 def _parse_caption(raw: str) -> str:
@@ -91,7 +105,7 @@ async def generate_caption(
         tag=f"gen-{style.key}",
         reasoning="none",
     )
-    return _parse_caption(raw)
+    return _reject_meta(_parse_caption(raw))
 
 
 DRAFT_PROMPT = """These {n} images are keyframes (in order) from one short video clip.
@@ -121,10 +135,13 @@ async def generate_draft(llm: Gemma, images_b64: list[str]) -> dict[str, str]:
     last_err: Exception | None = None
     for attempt in range(3):
         try:
+            # Only the first attempt may read the cache: a cached malformed
+            # response must never be replayed into every retry.
             raw = await llm.vision_chat(
                 DRAFT_PROMPT.format(n=len(images_b64)), images_b64,
-                temperature=0.7, max_tokens=3000, tag="draft",
+                temperature=0.7, max_tokens=6000, tag="draft",
                 seed=None if attempt == 0 else 500 + attempt,
+                cache=attempt == 0,
             )
             data = extract_json(raw)
             if not isinstance(data, dict):

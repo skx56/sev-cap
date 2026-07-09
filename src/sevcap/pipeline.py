@@ -71,6 +71,10 @@ async def process_clip(
     # ---- Phase 2: full SEV upgrade
     try:
         extractions = await extract_facts(llm, frames, k=settings.k_samples)
+        if len(extractions) < 3:
+            # Semantic entropy needs independent samples to agree; with fewer
+            # than 3 there is no consensus signal and "verification" is noise.
+            raise RuntimeError(f"only {len(extractions)} extraction samples succeeded")
         fact_sheet = await verify_facts(llm, extractions, settings.min_support)
         if not fact_sheet.verified:
             # Never caption from an empty sheet (the generator would write

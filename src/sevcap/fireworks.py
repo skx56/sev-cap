@@ -235,6 +235,7 @@ class Gemma:
         tag: str = "vision",
         system: str | None = None,
         reasoning: str | None = "low",
+        cache: bool | None = None,
     ) -> str:
         """Vision call that resolves the working VLM once and sticks with it."""
         content: list[dict[str, Any]] = [{"type": "text", "text": prompt}]
@@ -263,6 +264,7 @@ class Gemma:
                     seed=seed,
                     tag=tag,
                     reasoning=reasoning,
+                    cache=cache,
                 )
                 self._vision_model_resolved = m
                 return out

@@ -59,9 +59,19 @@ class Extraction:
         out = []
         for cat in CATEGORIES:
             for f in self.facts.get(cat, []):
-                if isinstance(f, str) and f.strip():
-                    out.append((cat, f.strip()))
+                if not isinstance(f, str):
+                    continue
+                txt = f.strip()
+                # drop junk "facts" like "...", "N/A", lone punctuation
+                if len(txt) >= 8 and sum(c.isalpha() for c in txt) >= 5:
+                    out.append((cat, txt))
         return out
+
+
+def _junk(s: str) -> bool:
+    """Template placeholders and non-statements must never become facts."""
+    t = s.strip().strip(".").strip()
+    return len(t) < 4 or t in {"..", "…", "etc", "n/a", "none", "N/A", "None"}
 
 
 def _parse(raw: str, sample_id: int) -> Extraction:
@@ -70,7 +80,13 @@ def _parse(raw: str, sample_id: int) -> Extraction:
         data = {"events": [x for x in data if isinstance(x, str)]}
     if not isinstance(data, dict):
         raise ValueError("extraction response is not a JSON object")
-    facts = {cat: [str(x) for x in data.get(cat, []) if str(x).strip()] for cat in CATEGORIES}
+    facts = {
+        cat: [str(x).strip() for x in data.get(cat, [])
+              if str(x).strip() and not _junk(str(x))]
+        for cat in CATEGORIES
+    }
+    if not any(facts.values()):
+        raise ValueError("extraction contained no usable facts")
     return Extraction(sample_id=sample_id, facts=facts)
 
 
@@ -83,15 +99,18 @@ async def extract_facts(
     prompt = PROMPT.format(n=len(frames), ts=ts)
 
     async def one(i: int) -> Extraction | None:
-        try:
-            raw = await llm.vision_chat(
-                prompt, images, temperature=temperature, seed=1000 + i,
-                tag="extract", system=SYSTEM, max_tokens=4000,
-            )
-            return _parse(raw, i)
-        except Exception as e:  # noqa: BLE001
-            log.warning("extraction sample %d failed: %s", i, e)
-            return None
+        for attempt in range(2):
+            try:
+                raw = await llm.vision_chat(
+                    prompt, images, temperature=temperature, seed=1000 + i,
+                    tag="extract", system=SYSTEM, max_tokens=6000,
+                    cache=attempt == 0,  # never replay a cached bad response
+                )
+                return _parse(raw, i)
+            except Exception as e:  # noqa: BLE001
+                log.warning("extraction sample %d attempt %d failed: %s",
+                            i, attempt + 1, str(e)[:150])
+        return None
 
     results = await asyncio.gather(*(one(i) for i in range(k)))
     good = [r for r in results if r is not None and r.flat()]
