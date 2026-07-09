@@ -11,6 +11,7 @@ import asyncio
 import logging
 from dataclasses import dataclass, field
 
+from .config import settings
 from .fireworks import Gemma, extract_json
 from .sampler import Keyframe
 
@@ -99,7 +100,7 @@ async def extract_facts(
     llm: Gemma,
     frames: list[Keyframe],
     k: int = 5,
-    temperature: float = 0.7,
+    temperature: float = settings.extract_temperature,
     transcript: str = "",
 ) -> list[Extraction]:
     """Run K independent extractions concurrently; tolerate partial failures.

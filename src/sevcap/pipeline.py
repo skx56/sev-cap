@@ -17,6 +17,7 @@ from __future__ import annotations
 import asyncio
 import logging
 import time
+from dataclasses import dataclass
 from pathlib import Path
 
 from .audio import transcribe
@@ -45,9 +46,19 @@ class Deadline:
         return self.remaining() <= reserve
 
 
-async def process_clip(
-    llm: Gemma, video: Path, writer: ResultWriter, deadline: Deadline
-) -> dict:
+@dataclass
+class DraftResult:
+    frames: list
+    transcript: str
+    draft: dict[str, str]
+
+
+async def draft_phase(llm: Gemma, video: Path, writer: ResultWriter) -> DraftResult:
+    """Phase 1 only: cheap, fast, run for every clip before any Phase 2 work.
+
+    Decoupled from Phase 2 so a slow-to-upgrade clip can never prevent other
+    clips from getting their immediate draft coverage (see module docstring).
+    """
     clip_id = video.stem
     log.info("[%s] sampling keyframes", clip_id)
     frames_task = asyncio.to_thread(sample_keyframes, str(video), settings.n_frames)
@@ -57,7 +68,6 @@ async def process_clip(
     if transcript:
         log.info("[%s] audio transcript (%d chars): %s", clip_id, len(transcript), transcript[:100])
 
-    # ---- Phase 1: draft written immediately (TIMEOUT/OUTPUT_MISSING defense)
     draft = None
     for attempt in range(2):
         try:
@@ -68,9 +78,17 @@ async def process_clip(
     if draft is None:
         draft = {k: "A short video clip." for k in STYLE_ORDER}
     writer.write(clip_id, draft, meta={"stage": "draft", "keyframes": len(frames)})
+    return DraftResult(frames=frames, transcript=transcript, draft=draft)
+
+
+async def upgrade_phase(
+    llm: Gemma, video: Path, writer: ResultWriter, deadline: Deadline, pre: DraftResult
+) -> dict:
+    clip_id = video.stem
+    frames, transcript, draft = pre.frames, pre.transcript, pre.draft
 
     if deadline.expired(reserve=60.0):
-        log.warning("[%s] budget exhausted after draft; keeping draft", clip_id)
+        log.warning("[%s] budget exhausted before SEV upgrade; keeping draft", clip_id)
         return {"clip": clip_id, "stage": "draft"}
 
     # ---- Phase 2: full SEV upgrade
@@ -119,6 +137,19 @@ async def process_clip(
         return {"clip": clip_id, "stage": "draft", "error": str(e)}
 
 
+async def process_clip(
+    llm: Gemma, video: Path, writer: ResultWriter, deadline: Deadline
+) -> dict:
+    """Single-clip convenience wrapper (draft phase, then SEV upgrade).
+
+    Used by callers that only ever process one clip at a time and don't need
+    the batch run()'s cross-clip draft/upgrade decoupling — e.g. the Gradio
+    demo, or ad-hoc scripts/tests.
+    """
+    pre = await draft_phase(llm, video, writer)
+    return await upgrade_phase(llm, video, writer, deadline, pre)
+
+
 async def run(input_dir: str | None = None, output_dir: str | None = None) -> dict:
     logging.basicConfig(
         level=logging.INFO, format="%(asctime)s %(name)s %(levelname)s %(message)s"
@@ -152,42 +183,76 @@ async def run(input_dir: str | None = None, output_dir: str | None = None) -> di
     except Exception as e:  # noqa: BLE001
         log.error("no vision model available: %s", e)
 
-    async def guarded(v: Path) -> dict:
+    # ---- Phase 1 for EVERY clip first, unthrottled by clip_concurrency.
+    # This is the OUTPUT_MISSING/starvation defense: previously Phase 1+2 ran
+    # together per clip under a clip_concurrency semaphore, so if the first
+    # few clips' Phase 2 got stuck retrying a degenerating model, later clips
+    # never even got a chance to run their (cheap, fast) draft — a real run
+    # left 2/7 clips at bare "placeholder" this way. Drafts are one call each
+    # and queue naturally behind the LLM client's own concurrency limit, so
+    # running all of them upfront costs little and guarantees every clip has
+    # real (non-placeholder) output within roughly one draft-call's latency.
+    async def guarded_draft(v: Path) -> tuple[Path, DraftResult | None]:
+        try:
+            return v, await draft_phase(llm, v, writer)
+        except Exception as e:  # noqa: BLE001
+            log.error("[%s] draft phase failed entirely: %s", v.stem, e)
+            writer.write(v.stem, {k: "A short video clip." for k in STYLE_ORDER},
+                         meta={"stage": "error", "error": str(e)})
+            return v, None
+
+    draft_pairs = await asyncio.gather(*(guarded_draft(v) for v in videos))
+    drafts: dict[Path, DraftResult] = {v: d for v, d in draft_pairs if d is not None}
+    best: dict[str, dict] = {
+        v.stem: {"clip": v.stem, "stage": "draft" if v in drafts else "error"}
+        for v in videos
+    }
+
+    # ---- Phase 2: SEV upgrades, bounded by clip_concurrency AND a per-clip
+    # timeout so one stuck clip can only ever hold up its own concurrency
+    # slot for a bounded time, never the whole remaining budget.
+    async def guarded_upgrade(v: Path) -> dict:
+        pre = drafts.get(v)
+        if pre is None:
+            return best[v.stem]
         async with clip_sem:
+            per_clip_budget = min(deadline.remaining(), settings.clip_upgrade_timeout_s)
+            if per_clip_budget <= 0:
+                return {"clip": v.stem, "stage": "draft"}
             try:
-                return await process_clip(llm, v, writer, deadline)
+                return await asyncio.wait_for(
+                    upgrade_phase(llm, v, writer, deadline, pre), timeout=per_clip_budget
+                )
+            except asyncio.TimeoutError:
+                log.warning("[%s] upgrade timed out after %.0fs; keeping draft",
+                            v.stem, per_clip_budget)
+                return {"clip": v.stem, "stage": "draft", "error": "upgrade-timeout"}
             except Exception as e:  # noqa: BLE001
-                log.error("[%s] clip failed entirely: %s", v.stem, e)
-                writer.write(v.stem, {k: "A short video clip." for k in STYLE_ORDER},
-                             meta={"stage": "error", "error": str(e)})
-                return {"clip": v.stem, "stage": "error", "error": str(e)}
+                log.error("[%s] clip upgrade failed entirely: %s", v.stem, e)
+                return {"clip": v.stem, "stage": "draft", "error": str(e)}
 
     async def one_pass(targets: list[Path]) -> list[dict]:
-        return await asyncio.gather(*(guarded(v) for v in targets))
+        return await asyncio.gather(*(guarded_upgrade(v) for v in targets))
 
     # Repair loop: transient provider outages (rate-limit storms, spurious
     # 401 windows) can sink a whole pass. While budget remains, re-attempt
     # every clip that did not reach sev-verified.
-    best: dict[str, dict] = {v.stem: {"clip": v.stem, "stage": "pending"} for v in videos}
-    targets = list(videos)
-    try:
-        for round_no in range(3):
-            round_results = await asyncio.wait_for(
-                one_pass(targets), timeout=max(deadline.remaining(), 1.0)
-            )
-            for r in round_results:
-                clip = r.get("clip")
-                if clip and (r.get("stage") == "sev-verified"
-                             or best[clip].get("stage") != "sev-verified"):
-                    best[clip] = r
-            targets = [v for v in videos if best[v.stem].get("stage") != "sev-verified"]
-            if not targets or deadline.expired(reserve=180.0):
-                break
-            log.warning("repair round %d: retrying %s",
-                        round_no + 1, [v.stem for v in targets])
-            await asyncio.sleep(min(60.0, max(deadline.remaining() * 0.05, 5.0)))
-    except asyncio.TimeoutError:
-        log.warning("global time budget hit; best output already on disk")
+    targets = [v for v in videos if v in drafts]
+    for round_no in range(3):
+        if not targets or deadline.expired(reserve=60.0):
+            break
+        round_results = await one_pass(targets)
+        for r in round_results:
+            clip = r.get("clip")
+            if clip and (r.get("stage") == "sev-verified"
+                         or best[clip].get("stage") != "sev-verified"):
+                best[clip] = r
+        targets = [v for v in videos if best[v.stem].get("stage") != "sev-verified"]
+        if not targets or deadline.expired(reserve=180.0):
+            break
+        log.warning("repair round %d: retrying %s",
+                    round_no + 1, [v.stem for v in targets])
+        await asyncio.sleep(min(60.0, max(deadline.remaining() * 0.05, 5.0)))
     results = list(best.values())
 
     summary = {
