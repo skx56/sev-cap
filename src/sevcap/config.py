@@ -75,7 +75,7 @@ class Settings:
     # multi-image calls under the request-timeout cliff we hit at 6–10.
     n_frames: int = field(default_factory=lambda: _int("SEVCAP_FRAMES", 4))
     extract_temperature: float = field(default_factory=lambda: _float("SEVCAP_EXTRACT_TEMP", 0.55))
-    time_budget_s: float = field(default_factory=lambda: _float("SEVCAP_TIME_BUDGET", 1500.0))
+    time_budget_s: float = field(default_factory=lambda: _float("SEVCAP_TIME_BUDGET", 1800.0))
     # One refine round buys most of the grounding/style-lineup win per clip at
     # roughly half the Stage-2 LLM-call cost vs two rounds.
     max_refine_rounds: int = field(default_factory=lambda: _int("SEVCAP_MAX_REFINE_ROUNDS", 1))
@@ -87,9 +87,10 @@ class Settings:
     lineup_min_confidence: int = field(default_factory=lambda: _int("SEVCAP_LINEUP_MIN_CONF", 3))
     # Hard per-clip Stage-2 cap: abandon upgrade and keep the draft rather than
     # let one stuck clip consume the global budget. Composes with Deadline.
-    # 300s fits K=3 Kimi extraction + clustering + gen + one refine under load.
+    # 420s fits K=3 Kimi extraction + clustering + gen + one refine when
+    # reasoning is disabled (reasoning=none) so completion tokens stay small.
     clip_upgrade_timeout_s: float = field(
-        default_factory=lambda: _float("SEVCAP_CLIP_UPGRADE_TIMEOUT", 300.0)
+        default_factory=lambda: _float("SEVCAP_CLIP_UPGRADE_TIMEOUT", 420.0)
     )
 
     cache_dir: str = field(default_factory=lambda: os.environ.get("SEVCAP_CACHE_DIR", ".sevcap_cache"))

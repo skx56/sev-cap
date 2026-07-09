@@ -296,7 +296,7 @@ class Gemma:
         seed: int | None = None,
         tag: str = "vision",
         system: str | None = None,
-        reasoning: str | None = "low",
+        reasoning: str | None = "none",
         cache: bool | None = None,
     ) -> str:
         """Vision call with per-call fallback: a model that degenerates on one

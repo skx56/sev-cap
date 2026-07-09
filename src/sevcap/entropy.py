@@ -128,7 +128,7 @@ async def _cluster_category(
                 [{"role": "user", "content": CLUSTER_PROMPT.format(statements=statements)}],
                 temperature=0.0 if attempt == 0 else 0.3,
                 tag="entail-cluster", max_tokens=6000, cache=attempt == 0,
-                reasoning="low",
+                reasoning="none",
             )
             groups = extract_json(raw)
             assert isinstance(groups, list)
@@ -216,7 +216,7 @@ async def check_grounding(llm: Gemma, fact_sheet: FactSheet, caption: str) -> tu
     claims = "\n".join(f"{i + 1}. {s}" for i, s in enumerate(sentences))
     raw = await llm.chat(
         [{"role": "user", "content": ENTAIL_PROMPT.format(facts=fact_sheet.as_text(), claims=claims)}],
-        temperature=0.0, tag="grounding", max_tokens=2000, reasoning="low",
+        temperature=0.0, tag="grounding", max_tokens=2000, reasoning="none",
     )
     try:
         verdicts = extract_json(raw).get("verdicts", [])
