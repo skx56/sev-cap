@@ -18,13 +18,13 @@ ENV SEVCAP_WHISPER_CACHE_DIR=/app/.whisper_cache
 RUN python -c "from faster_whisper import WhisperModel; WhisperModel('base', device='cpu', compute_type='int8', download_root='/app/.whisper_cache')"
 
 # Defaults the harness can override with -e; the key is NEVER baked in.
-# Primary model is our dedicated Gemma 4 31B deployment (scale-to-zero);
-# if the scoring key cannot reach it, the client falls back to Kimi K2p6.
+# Primary is Kimi K2.6 (reliable serverless VLM+text). Gemma remains an
+# optional env override for the bonus chase, not the image default.
 ENV INPUT_DIR=/input \
     OUTPUT_DIR=/output \
     SEVCAP_CACHE=0 \
-    SEVCAP_MODEL="accounts/fireworks/models/gemma-4-26b-a4b-it#accounts/skx56/deployments/c4pafnfc" \
-    SEVCAP_VISION_MODEL="accounts/fireworks/models/gemma-4-26b-a4b-it#accounts/skx56/deployments/c4pafnfc" \
+    SEVCAP_MODEL="accounts/fireworks/models/kimi-k2p6" \
+    SEVCAP_VISION_MODEL="accounts/fireworks/models/kimi-k2p6" \
     PYTHONUNBUFFERED=1
 
 # Exec-form, argument-free: runs the full anytime pipeline.

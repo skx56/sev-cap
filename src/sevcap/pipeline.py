@@ -94,9 +94,13 @@ async def upgrade_phase(
     # ---- Phase 2: full SEV upgrade
     try:
         extractions = await extract_facts(llm, frames, k=settings.k_samples, transcript=transcript)
-        if len(extractions) < 3:
-            # Semantic entropy needs independent samples to agree; with fewer
-            # than 3 there is no consensus signal and "verification" is noise.
+        # Semantic entropy needs independent samples to agree; below 2 there
+        # is no consensus signal and "verification" is noise. Scaled to
+        # k_samples (not a fixed 3) since K itself is now as low as 3 and
+        # requiring 3-of-3 successes here would defeat the point of lowering
+        # K for reliability in the first place.
+        min_needed = min(2, settings.k_samples)
+        if len(extractions) < min_needed:
             raise RuntimeError(f"only {len(extractions)} extraction samples succeeded")
         fact_sheet = await verify_facts(llm, extractions, settings.min_support)
         if not fact_sheet.verified:
@@ -137,17 +141,47 @@ async def upgrade_phase(
         return {"clip": clip_id, "stage": "draft", "error": str(e)}
 
 
+async def _upgrade_with_cap(
+    llm: Gemma, video: Path, writer: ResultWriter, deadline: Deadline, pre: DraftResult
+) -> dict:
+    """Run upgrade_phase under a hard per-clip time cap.
+
+    Bounds Phase 2 (extraction + verification + gates + refine) to
+    settings.clip_upgrade_timeout_s (also capped by whatever remains of the
+    global deadline) so one clip stuck retrying a degenerating model can
+    never consume the whole run's time budget — it just falls back to its
+    already-written draft. Composes with (does not replace) the global
+    Deadline: the global deadline still shrinks per_clip_budget below the
+    timeout as the run's overall time runs out.
+    """
+    clip_id = video.stem
+    per_clip_budget = min(deadline.remaining(), settings.clip_upgrade_timeout_s)
+    if per_clip_budget <= 0:
+        return {"clip": clip_id, "stage": "draft"}
+    try:
+        return await asyncio.wait_for(
+            upgrade_phase(llm, video, writer, deadline, pre), timeout=per_clip_budget
+        )
+    except asyncio.TimeoutError:
+        log.warning("[%s] upgrade timed out after %.0fs; keeping draft",
+                    clip_id, per_clip_budget)
+        return {"clip": clip_id, "stage": "draft", "error": "upgrade-timeout"}
+
+
 async def process_clip(
     llm: Gemma, video: Path, writer: ResultWriter, deadline: Deadline
 ) -> dict:
-    """Single-clip convenience wrapper (draft phase, then SEV upgrade).
+    """Single-clip convenience wrapper (draft phase, then capped SEV upgrade).
 
     Used by callers that only ever process one clip at a time and don't need
-    the batch run()'s cross-clip draft/upgrade decoupling — e.g. the Gradio
-    demo, or ad-hoc scripts/tests.
+    the batch run()'s cross-clip draft/upgrade decoupling — e.g. the
+    Streamlit demo, or ad-hoc scripts/tests.
     """
     pre = await draft_phase(llm, video, writer)
-    return await upgrade_phase(llm, video, writer, deadline, pre)
+    if deadline.expired(reserve=60.0):
+        log.warning("[%s] budget exhausted before SEV upgrade; keeping draft", video.stem)
+        return {"clip": video.stem, "stage": "draft"}
+    return await _upgrade_with_cap(llm, video, writer, deadline, pre)
 
 
 async def run(input_dir: str | None = None, output_dir: str | None = None) -> dict:
@@ -216,17 +250,8 @@ async def run(input_dir: str | None = None, output_dir: str | None = None) -> di
         if pre is None:
             return best[v.stem]
         async with clip_sem:
-            per_clip_budget = min(deadline.remaining(), settings.clip_upgrade_timeout_s)
-            if per_clip_budget <= 0:
-                return {"clip": v.stem, "stage": "draft"}
             try:
-                return await asyncio.wait_for(
-                    upgrade_phase(llm, v, writer, deadline, pre), timeout=per_clip_budget
-                )
-            except asyncio.TimeoutError:
-                log.warning("[%s] upgrade timed out after %.0fs; keeping draft",
-                            v.stem, per_clip_budget)
-                return {"clip": v.stem, "stage": "draft", "error": "upgrade-timeout"}
+                return await _upgrade_with_cap(llm, v, writer, deadline, pre)
             except Exception as e:  # noqa: BLE001
                 log.error("[%s] clip upgrade failed entirely: %s", v.stem, e)
                 return {"clip": v.stem, "stage": "draft", "error": str(e)}

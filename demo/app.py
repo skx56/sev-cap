@@ -1,6 +1,7 @@
-"""Minimal Gradio demo: upload a video, get 4 SEV-Cap captions.
+"""Streamlit demo: upload an mp4, get 4 SEV-Cap captions from the real pipeline.
 
-Uses the real pipeline (process_clip). Launch with share=True for a public URL.
+Launch:
+  streamlit run demo/app.py --server.port 7860 --server.headless true
 """
 from __future__ import annotations
 
@@ -9,16 +10,25 @@ import json
 import logging
 import os
 import shutil
+import sys
 import tempfile
 import time
 from pathlib import Path
 
-import gradio as gr
+import streamlit as st
 
-# Ensure package import works when launched as `python demo/app.py`
-import sys
 ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT / "src"))
+
+# Load .env if present (demo convenience; Docker/harness uses real env).
+_env = ROOT / ".env"
+if _env.exists():
+    for line in _env.read_text().splitlines():
+        line = line.strip()
+        if not line or line.startswith("#") or "=" not in line:
+            continue
+        k, v = line.split("=", 1)
+        os.environ.setdefault(k.strip(), v.strip().strip('"').strip("'"))
 
 from sevcap.fireworks import Gemma  # noqa: E402
 from sevcap.io_contract import ResultWriter  # noqa: E402
@@ -30,26 +40,20 @@ logging.basicConfig(
 )
 log = logging.getLogger("sevcap.demo")
 
-# Demo budget: drafts land fast; SEV upgrade runs if time remains.
 DEMO_BUDGET_S = float(os.environ.get("SEVCAP_DEMO_BUDGET", "240"))
 OUT_DIR = Path(__file__).resolve().parent / "out" / "results"
 OUT_DIR.mkdir(parents=True, exist_ok=True)
 
-_llm: Gemma | None = None
-_llm_lock = asyncio.Lock()
 
-
-async def _get_llm() -> Gemma:
-    global _llm
-    async with _llm_lock:
-        if _llm is None:
-            _llm = Gemma()
-            try:
-                await _llm.resolve_text_model()
-                await _llm.check_vision()
-            except Exception as e:  # noqa: BLE001
-                log.warning("model warm-up failed (will retry on request): %s", e)
-        return _llm
+@st.cache_resource
+def _get_llm() -> Gemma:
+    llm = Gemma()
+    try:
+        asyncio.run(llm.resolve_text_model())
+        asyncio.run(llm.check_vision())
+    except Exception as e:  # noqa: BLE001
+        log.warning("model warm-up failed (will retry on request): %s", e)
+    return llm
 
 
 def _format_facts(meta: dict) -> str:
@@ -57,111 +61,77 @@ def _format_facts(meta: dict) -> str:
     verified = fv.get("verified_facts") or []
     if not verified:
         return "(no verified facts yet — draft stage or empty sheet)"
-    lines = [f"[{f.get('category','?')}] {f.get('text','')}  (support {f.get('support','?')})"
-             for f in verified[:20]]
-    return "\n".join(lines)
+    return "\n".join(
+        f"[{f.get('category', '?')}] {f.get('text', '')}  (support {f.get('support', '?')})"
+        for f in verified[:20]
+    )
 
 
-async def caption_video(video_path: str | None) -> tuple[str, str, str, str, str, str]:
-    if not video_path:
-        return ("", "", "", "", "Please upload an mp4 video.", "")
-
-    src = Path(video_path)
-    if not src.exists():
-        return ("", "", "", "", f"Upload missing: {video_path}", "")
-
+async def _caption(video_path: Path) -> tuple[dict[str, str], str, str]:
     work = Path(tempfile.mkdtemp(prefix="sevcap_demo_"))
     try:
-        dest = work / f"upload{src.suffix or '.mp4'}"
-        shutil.copy2(src, dest)
-
-        llm = await _get_llm()
+        dest = work / f"upload{video_path.suffix or '.mp4'}"
+        shutil.copy2(video_path, dest)
+        llm = _get_llm()
         writer = ResultWriter(OUT_DIR)
         deadline = Deadline(DEMO_BUDGET_S)
         t0 = time.monotonic()
-        log.info("demo request: %s budget=%.0fs", dest.name, DEMO_BUDGET_S)
         result = await process_clip(llm, dest, writer, deadline)
         elapsed = time.monotonic() - t0
-
-        clip_id = dest.stem
-        rec_path = OUT_DIR / f"{clip_id}.json"
+        rec_path = OUT_DIR / f"{dest.stem}.json"
         if not rec_path.exists():
-            return ("", "", "", "", f"No output written ({result})", "")
-
+            return {}, f"No output written ({result})", ""
         rec = json.loads(rec_path.read_text())
         caps = rec.get("captions") or {}
         meta = rec.get("verification") or {}
         stage = meta.get("stage") or result.get("stage", "?")
         status = (
             f"Done in {elapsed:.0f}s · stage={stage} · "
-            f"budget={DEMO_BUDGET_S:.0f}s (draft first, then SEV upgrade if time allows)"
+            f"budget={DEMO_BUDGET_S:.0f}s"
         )
-        facts = _format_facts(meta)
-        return (
-            caps.get("formal", ""),
-            caps.get("sarcastic", ""),
-            caps.get("humorous_tech", ""),
-            caps.get("humorous_non_tech", ""),
-            status,
-            facts,
-        )
-    except Exception as e:  # noqa: BLE001
-        log.exception("demo caption failed")
-        return ("", "", "", "", f"Error: {e}", "")
+        return caps, status, _format_facts(meta)
     finally:
         shutil.rmtree(work, ignore_errors=True)
 
 
-def build_ui() -> gr.Blocks:
-    with gr.Blocks(title="SEV-Cap Demo") as demo:
-        gr.Markdown(
-            """
-# SEV-Cap — live caption demo
-Upload a short mp4. The **real** pipeline runs (Gemma vision + Whisper audio +
-semantic-entropy verification). Expect **~1–4 minutes** depending on clip length
-and model warm-up (scale-to-zero may add a short wait on the first request).
-"""
-        )
-        video = gr.Video(label="Video (mp4)", sources=["upload"])
-        btn = gr.Button("Generate captions", variant="primary")
-        status = gr.Textbox(label="Status", interactive=False)
-        with gr.Row():
-            formal = gr.Textbox(label="Formal", lines=3)
-            sarcastic = gr.Textbox(label="Sarcastic", lines=3)
-        with gr.Row():
-            tech = gr.Textbox(label="Humorous (tech)", lines=3)
-            nontech = gr.Textbox(label="Humorous (non-tech)", lines=3)
-        facts = gr.Textbox(label="Verified facts (if SEV upgrade finished)", lines=8)
+def main() -> None:
+    st.set_page_config(page_title="SEV-Cap Demo", layout="wide")
+    st.title("SEV-Cap")
+    st.caption(
+        "Semantic-entropy verified multi-style video captions. "
+        "Upload a short mp4 — the real pipeline runs (draft first, then SEV upgrade)."
+    )
 
-        btn.click(
-            fn=caption_video,
-            inputs=[video],
-            outputs=[formal, sarcastic, tech, nontech, status, facts],
-        )
-    return demo
+    uploaded = st.file_uploader("Video (mp4)", type=["mp4", "mov", "mkv", "webm"])
+    run = st.button("Generate captions", type="primary", disabled=uploaded is None)
+
+    if run and uploaded is not None:
+        tmp = Path(tempfile.mkdtemp(prefix="sevcap_up_")) / uploaded.name
+        tmp.write_bytes(uploaded.getvalue())
+        with st.spinner("Running SEV-Cap pipeline (often 1–3 minutes)…"):
+            try:
+                caps, status, facts = asyncio.run(_caption(tmp))
+            except Exception as e:  # noqa: BLE001
+                st.error(f"Error: {e}")
+                return
+            finally:
+                shutil.rmtree(tmp.parent, ignore_errors=True)
+
+        st.success(status)
+        c1, c2 = st.columns(2)
+        with c1:
+            st.subheader("Formal")
+            st.write(caps.get("formal") or "—")
+            st.subheader("Sarcastic")
+            st.write(caps.get("sarcastic") or "—")
+        with c2:
+            st.subheader("Humorous (tech)")
+            st.write(caps.get("humorous_tech") or "—")
+            st.subheader("Humorous (non-tech)")
+            st.write(caps.get("humorous_non_tech") or "—")
+        with st.expander("Verified facts (if SEV upgrade finished)"):
+            st.text(facts)
 
 
 if __name__ == "__main__":
-    if not os.environ.get("FIREWORKS_API_KEY"):
-        env_path = ROOT / ".env"
-        if env_path.exists():
-            for line in env_path.read_text().splitlines():
-                line = line.strip()
-                if not line or line.startswith("#") or "=" not in line:
-                    continue
-                k, v = line.split("=", 1)
-                os.environ.setdefault(k.strip(), v.strip().strip('"').strip("'"))
-
-    app = build_ui()
-    app.queue(default_concurrency_limit=1)
-    app.launch(
-        server_name="0.0.0.0",
-        server_port=int(os.environ.get("SEVCAP_DEMO_PORT", "7860")),
-        share=True,
-        show_error=True,
-        prevent_thread_lock=True,
-    )
-    print("KEEPALIVE: Gradio share launched", flush=True)
-    import time
-    while True:
-        time.sleep(3600)
+    main()
