@@ -28,11 +28,11 @@ log = logging.getLogger("sevcap.entropy")
 CLUSTER_PROMPT = """You are a strict natural-language-inference judge.
 
 Below is a numbered list of short factual statements about the same video.
-Group them into clusters of statements that BIDIRECTIONALLY ENTAIL each other:
-statement A and B belong together only if A being true implies B is true AND
-B being true implies A is true (i.e. they assert the same fact, possibly in
-different words). Different levels of detail that do not mutually entail each
-other belong in DIFFERENT clusters.
+Group them into clusters of statements that assert THE SAME CORE FACT — the
+same subject doing or being the same thing — even when the wording or minor
+detail level differs. "a brown flying squirrel" and "a small squirrel with
+large eyes" describe the same subject: same cluster. Statements about clearly
+DIFFERENT subjects, actions, or moments go in different clusters.
 
 Statements:
 {statements}

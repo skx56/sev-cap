@@ -26,12 +26,16 @@ SYSTEM = (
 
 PROMPT = """These {n} images are keyframes sampled in chronological order from ONE short video clip (timestamps: {ts}).
 
-List atomic facts about the video. An atomic fact is ONE short, self-contained, verifiable statement (max ~12 words), e.g. "a man in a red jacket rides a bicycle".
+List the SALIENT atomic facts about the video. An atomic fact is ONE short, self-contained, verifiable statement (max ~12 words), e.g. "a man in a red jacket rides a bicycle".
 
 Rules:
 - Only include what is clearly visible. If unsure, leave it out.
+- Prioritize the STORY: what happens, in order, goes under events (3-6 events).
+- At most 6 facts per category — the most important ones only, no minor
+  background details (individual leaves, rocks, lighting nuances).
+- Name each subject consistently (e.g. always "the squirrel", not sometimes
+  "the small creature").
 - No speculation about names, brands, emotions, or off-screen events.
-- Describe changes over time as events (e.g. "the car stops at a crossing").
 - If text is legible on screen, quote it exactly under on_screen_text.
 
 Think briefly if needed, then END your response with ONLY a JSON object in

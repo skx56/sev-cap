@@ -41,11 +41,16 @@ CAPTION: <the caption text>"""
 
 
 def _parse_caption(raw: str) -> str:
-    """Take the last CAPTION: line; fall back to the last non-empty line."""
+    """Take the last CAPTION: line; fall back to the last *complete* line."""
     lines = [ln.strip() for ln in raw.strip().splitlines() if ln.strip()]
     for ln in reversed(lines):
         if ln.upper().startswith("CAPTION:"):
             return ln[len("CAPTION:"):].strip().strip('"').strip()
+    # No CAPTION marker: prefer the last line that ends like a sentence
+    # (a truncated generation leaves a dangling fragment we must not ship).
+    for ln in reversed(lines):
+        if ln.endswith((".", "!", "?", '"', "”")):
+            return ln.strip('"').strip()
     return (lines[-1] if lines else raw).strip().strip('"').strip()
 
 
@@ -81,10 +86,10 @@ async def generate_caption(
     raw = await llm.chat(
         [{"role": "system", "content": SYSTEM}, {"role": "user", "content": prompt}],
         temperature=style.temperature,
-        max_tokens=1500,
+        max_tokens=2500,
         seed=seed,
         tag=f"gen-{style.key}",
-        reasoning="low",
+        reasoning="none",
     )
     return _parse_caption(raw)
 

@@ -44,8 +44,11 @@ async def main() -> int:
         video = next(Path(args.clips).glob(f"{rec['clip']}.*"), None)
         if not video:
             continue
-        scores = await judge_clip(llm, str(video), rec["captions"])
-        rows.append((rec["clip"], scores))
+        try:
+            scores = await judge_clip(llm, str(video), rec["captions"])
+            rows.append((rec["clip"], scores))
+        except Exception as e:  # noqa: BLE001
+            print(f"judge failed for {rec['clip']}: {str(e)[:150]}")
 
     print(f"\n{'clip':24} {'style':18} {'acc':>4} {'tone':>4}")
     accs, tones = [], []

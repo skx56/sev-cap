@@ -31,7 +31,8 @@ For EACH caption give:
 - tone 1-5: does it genuinely read as its labeled style? (5 = unmistakable,
   1 = wrong style entirely)
 
-Return ONLY JSON:
+Think briefly if needed, then END your response with one line containing ONLY
+the JSON:
 {{"scores": {{"formal": {{"accuracy": 5, "tone": 5}}, "sarcastic": {{...}},
 "humorous_tech": {{...}}, "humorous_non_tech": {{...}}}}}}"""
 
@@ -41,6 +42,6 @@ async def judge_clip(llm: Gemma, video: str, captions: dict[str, str]) -> dict:
     images = [f.b64() for f in frames]
     raw = await llm.vision_chat(
         JUDGE_PROMPT.format(n=len(images), **captions),
-        images, temperature=0.0, max_tokens=2000, tag="eval-judge",
+        images, temperature=0.0, max_tokens=6000, tag="eval-judge",
     )
     return extract_json(raw).get("scores", {})
