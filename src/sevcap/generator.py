@@ -134,10 +134,23 @@ async def generate_draft(
     downstream degrades to it, the draft itself retries hard.
     """
     import asyncio
+    import re
 
     from .fireworks import extract_json
 
     audio_block = _DRAFT_AUDIO_BLOCK.format(transcript=transcript) if transcript else ""
+
+    def _salvage_partial(raw: str) -> dict[str, str] | None:
+        """Pull any complete style strings out of truncated JSON."""
+        out: dict[str, str] = {}
+        for key in ("formal", "sarcastic", "humorous_tech", "humorous_non_tech"):
+            m = re.search(rf'"{key}"\s*:\s*"((?:[^"\\]|\\.)*)"', raw)
+            if m:
+                val = m.group(1).strip()
+                if len(val) >= 15:
+                    out[key] = val
+        return out if len(out) == 4 else None
+
     last_err: Exception | None = None
     for attempt in range(3):
         try:
@@ -149,7 +162,13 @@ async def generate_draft(
                 seed=None if attempt == 0 else 500 + attempt,
                 cache=attempt == 0,
             )
-            data = extract_json(raw)
+            try:
+                data = extract_json(raw)
+            except Exception:
+                salvaged = _salvage_partial(raw)
+                if salvaged:
+                    return salvaged
+                raise
             if not isinstance(data, dict):
                 raise ValueError("draft response is not a JSON object")
             out = {}

@@ -16,7 +16,6 @@ from __future__ import annotations
 
 import asyncio
 import logging
-import os
 import time
 from dataclasses import dataclass
 from pathlib import Path
@@ -219,23 +218,14 @@ async def run(input_dir: str | None = None, output_dir: str | None = None) -> di
         log.error("no vision model available: %s", e)
 
     # ---- Phase 1 for EVERY clip first (before any Phase 2). Bounded by the
-    # same clip_concurrency semaphore AND a hard per-draft timeout so a
-    # single slow/timeouting draft call cannot pin the whole batch forever
-    # (observed under Kimi serverless load: 2/7 drafts hung while 5 finished).
-    # Clips that miss the draft timeout keep their placeholder and are still
-    # eligible for a later repair-round draft+upgrade if budget remains.
-    draft_timeout_s = float(os.environ.get("SEVCAP_DRAFT_TIMEOUT", "240"))
-
+    # same clip_concurrency semaphore. Do NOT wrap drafts in asyncio.wait_for:
+    # cancelling an in-flight Kimi multi-image call mid-response leaves
+    # truncated JSON and wastes the work; the HTTP client timeout + draft
+    # retries already bound hang risk without aborting a nearly-done call.
     async def guarded_draft(v: Path) -> tuple[Path, DraftResult | None]:
         async with clip_sem:
             try:
-                return v, await asyncio.wait_for(
-                    draft_phase(llm, v, writer), timeout=draft_timeout_s
-                )
-            except asyncio.TimeoutError:
-                log.warning("[%s] draft timed out after %.0fs; keeping placeholder",
-                            v.stem, draft_timeout_s)
-                return v, None
+                return v, await draft_phase(llm, v, writer)
             except Exception as e:  # noqa: BLE001
                 log.error("[%s] draft phase failed entirely: %s", v.stem, e)
                 writer.write(v.stem, {k: "A short video clip." for k in STYLE_ORDER},
