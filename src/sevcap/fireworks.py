@@ -154,7 +154,7 @@ class Gemma:
         self.client = AsyncOpenAI(
             api_key=api_key or settings.api_key or "MISSING",
             base_url=settings.base_url,
-            timeout=120.0,
+            timeout=180.0,
             max_retries=0,  # we do our own retries
         )
         self.usage = Usage()

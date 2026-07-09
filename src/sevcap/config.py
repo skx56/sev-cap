@@ -79,10 +79,11 @@ class Settings:
     # One refine round buys most of the grounding/style-lineup win per clip at
     # roughly half the Stage-2 LLM-call cost vs two rounds.
     max_refine_rounds: int = field(default_factory=lambda: _int("SEVCAP_MAX_REFINE_ROUNDS", 1))
-    # Keep concurrency modest on serverless Kimi — flooding it with 7 parallel
+    # Keep concurrency modest on serverless Kimi — flooding it with parallel
     # multi-image draft calls causes request timeouts that stall the batch.
-    clip_concurrency: int = field(default_factory=lambda: _int("SEVCAP_CLIP_CONCURRENCY", 2))
-    llm_concurrency: int = field(default_factory=lambda: _int("SEVCAP_LLM_CONCURRENCY", 3))
+    # 1 = fully serial drafts/upgrades (slow but reliable on Kimi serverless).
+    clip_concurrency: int = field(default_factory=lambda: _int("SEVCAP_CLIP_CONCURRENCY", 1))
+    llm_concurrency: int = field(default_factory=lambda: _int("SEVCAP_LLM_CONCURRENCY", 2))
     lineup_min_confidence: int = field(default_factory=lambda: _int("SEVCAP_LINEUP_MIN_CONF", 3))
     # Hard per-clip Stage-2 cap: abandon upgrade and keep the draft rather than
     # let one stuck clip consume the global budget. Composes with Deadline.
