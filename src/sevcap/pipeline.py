@@ -108,6 +108,20 @@ async def upgrade_phase(
             # meta-captions about missing facts). Keep the visual draft.
             raise RuntimeError("empty fact sheet after verification")
 
+        # Persist the verification report the moment it exists, alongside the
+        # current draft captions. If generation/refine below is later killed by
+        # the per-clip or global timeout, the verified/rejected facts still
+        # survive on disk (and in the demo UI) instead of being lost.
+        writer.write(
+            clip_id,
+            draft,
+            meta={
+                "stage": "facts-verified",
+                "keyframes": len(frames),
+                "fact_verification": fact_sheet.report(),
+            },
+        )
+
         captions: dict[str, str] = {}
         images = [f.b64() for f in frames]
         results = await asyncio.gather(

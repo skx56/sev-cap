@@ -40,7 +40,7 @@ logging.basicConfig(
 )
 log = logging.getLogger("sevcap.demo")
 
-DEMO_BUDGET_S = float(os.environ.get("SEVCAP_DEMO_BUDGET", "240"))
+DEMO_BUDGET_S = float(os.environ.get("SEVCAP_DEMO_BUDGET", "600"))
 OUT_DIR = Path(__file__).resolve().parent / "out" / "results"
 OUT_DIR.mkdir(parents=True, exist_ok=True)
 
