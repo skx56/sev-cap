@@ -11,3 +11,5 @@ eval/out/
 .pytest_cache/
 dist/
 build/
+.gradio/
+demo/out/
