@@ -18,7 +18,7 @@ LLM-Judge grades:
 | **Live demo** | <https://associates-desired-avatar-doctrine.trycloudflare.com> |
 | **Docker image** | `ghcr.io/skx56/sev-cap:latest` (linux/amd64) |
 | **Repository** | <https://github.com/skx56/sev-cap> |
-| **Presentation** | [docs/SEV-Cap-Presentation.pdf](docs/SEV-Cap-Presentation.pdf) (8 pages) |
+| **Presentation** | [SEV-Cap-Presentation.pdf](SEV-Cap-Presentation.pdf) (8 pages) |
 
 Upload a short clip in the browser and watch the pipeline produce all four
 styles plus a verification report (verified vs. rejected facts). The demo is a
