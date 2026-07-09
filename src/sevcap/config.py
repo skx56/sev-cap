@@ -71,8 +71,9 @@ class Settings:
     # samples and is unrealistically strict under any per-call failure rate.
     min_support: int = field(default_factory=lambda: _int("SEVCAP_MIN_SUPPORT", 2))
     # Fewer images per vision call cuts cost/latency without losing story
-    # coverage for ~30-90s clips.
-    n_frames: int = field(default_factory=lambda: _int("SEVCAP_FRAMES", 6))
+    # coverage for ~30-90s clips. 4 is enough for short clips and keeps Kimi
+    # multi-image calls under the request-timeout cliff we hit at 6–10.
+    n_frames: int = field(default_factory=lambda: _int("SEVCAP_FRAMES", 4))
     extract_temperature: float = field(default_factory=lambda: _float("SEVCAP_EXTRACT_TEMP", 0.55))
     time_budget_s: float = field(default_factory=lambda: _float("SEVCAP_TIME_BUDGET", 1500.0))
     # One refine round buys most of the grounding/style-lineup win per clip at
@@ -85,8 +86,9 @@ class Settings:
     lineup_min_confidence: int = field(default_factory=lambda: _int("SEVCAP_LINEUP_MIN_CONF", 3))
     # Hard per-clip Stage-2 cap: abandon upgrade and keep the draft rather than
     # let one stuck clip consume the global budget. Composes with Deadline.
+    # 300s fits K=3 Kimi extraction + clustering + gen + one refine under load.
     clip_upgrade_timeout_s: float = field(
-        default_factory=lambda: _float("SEVCAP_CLIP_UPGRADE_TIMEOUT", 120.0)
+        default_factory=lambda: _float("SEVCAP_CLIP_UPGRADE_TIMEOUT", 300.0)
     )
 
     cache_dir: str = field(default_factory=lambda: os.environ.get("SEVCAP_CACHE_DIR", ".sevcap_cache"))

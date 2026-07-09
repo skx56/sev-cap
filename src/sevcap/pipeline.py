@@ -224,7 +224,7 @@ async def run(input_dir: str | None = None, output_dir: str | None = None) -> di
     # (observed under Kimi serverless load: 2/7 drafts hung while 5 finished).
     # Clips that miss the draft timeout keep their placeholder and are still
     # eligible for a later repair-round draft+upgrade if budget remains.
-    draft_timeout_s = float(os.environ.get("SEVCAP_DRAFT_TIMEOUT", "90"))
+    draft_timeout_s = float(os.environ.get("SEVCAP_DRAFT_TIMEOUT", "180"))
 
     async def guarded_draft(v: Path) -> tuple[Path, DraftResult | None]:
         async with clip_sem:
