@@ -15,9 +15,10 @@ from .styles import StyleConfig
 
 SYSTEM = (
     "You are an award-winning caption writer. You write captions for short "
-    "video clips based STRICTLY on a verified fact sheet. You never invent "
-    "objects, actions, places, names, numbers or events that are not on the "
-    "sheet. Style is yours; facts are not."
+    "video clips based STRICTLY on a verified fact sheet (and optional "
+    "keyframes that only confirm what the sheet already states). You never "
+    "invent objects, actions, places, names, numbers or events that are not "
+    "on the sheet. Style is yours; facts are not."
 )
 
 GEN_PROMPT = """Style: {label}
@@ -35,9 +36,9 @@ Here are examples of PERFECT captions in this style:
 
 Now write ONE caption in the {label} style for the following video.
 
-VERIFIED FACT SHEET:
+VERIFIED FACT SHEET (authoritative — every concrete claim must come from here):
 {facts}
-{feedback}
+{frames_note}{feedback}
 Think if you need to, but END your response with a single line of the form:
 CAPTION: <the caption text>"""
 
@@ -81,12 +82,20 @@ async def generate_caption(
     style: StyleConfig,
     feedback: str | None = None,
     seed: int | None = None,
+    images_b64: list[str] | None = None,
 ) -> str:
     feedback_block = ""
     if feedback:
         feedback_block = (
             "\nYour previous attempt failed review. Feedback to fix in this "
             f"rewrite:\n{feedback}\n"
+        )
+    frames_note = ""
+    if images_b64:
+        frames_note = (
+            "\nKeyframes are attached for visual grounding only. Use them to "
+            "get names/appearance right, but do NOT add any concrete detail "
+            "that is absent from the verified fact sheet.\n"
         )
     prompt = GEN_PROMPT.format(
         label=style.label,
@@ -95,16 +104,28 @@ async def generate_caption(
         anti="\n".join(f"- {a}" for a in style.anti_patterns),
         exemplars=_format_exemplars(style),
         facts=fact_sheet.as_text(),
+        frames_note=frames_note,
         feedback=feedback_block,
     )
-    raw = await llm.chat(
-        [{"role": "system", "content": SYSTEM}, {"role": "user", "content": prompt}],
-        temperature=style.temperature,
-        max_tokens=2500,
-        seed=seed,
-        tag=f"gen-{style.key}",
-        reasoning="none",
-    )
+    if images_b64:
+        raw = await llm.vision_chat(
+            prompt, images_b64,
+            temperature=style.temperature,
+            max_tokens=2500,
+            seed=seed,
+            tag=f"gen-{style.key}",
+            system=SYSTEM,
+            reasoning="none",
+        )
+    else:
+        raw = await llm.chat(
+            [{"role": "system", "content": SYSTEM}, {"role": "user", "content": prompt}],
+            temperature=style.temperature,
+            max_tokens=2500,
+            seed=seed,
+            tag=f"gen-{style.key}",
+            reasoning="none",
+        )
     return _reject_meta(_parse_caption(raw))
 
 

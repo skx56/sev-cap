@@ -68,7 +68,7 @@ async def test_refine_keeps_best_attempt(fake_llm, monkeypatch):
     async def fake_grounding(llm, fs, caption):
         return True, []
 
-    async def fake_generate(llm, fs, style, feedback=None, seed=None):
+    async def fake_generate(llm, fs, style, feedback=None, seed=None, images_b64=None):
         assert feedback and "sarcastic" in feedback.lower() or style.key == "sarcastic"
         return "Ah yes, the ball. Clearly the dog's finest hour."
 

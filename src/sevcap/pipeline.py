@@ -109,8 +109,9 @@ async def upgrade_phase(
             raise RuntimeError("empty fact sheet after verification")
 
         captions: dict[str, str] = {}
+        images = [f.b64() for f in frames]
         results = await asyncio.gather(
-            *(generate_caption(llm, fact_sheet, STYLES[k], seed=100 + i)
+            *(generate_caption(llm, fact_sheet, STYLES[k], seed=100 + i, images_b64=images)
               for i, k in enumerate(STYLE_ORDER)),
             return_exceptions=True,
         )
@@ -118,14 +119,21 @@ async def upgrade_phase(
             ok = not isinstance(res, Exception) and str(res).strip()
             captions[k] = str(res).strip() if ok else draft[k]
 
-        outcomes = await refine_captions(llm, fact_sheet, captions)
+        outcomes = await refine_captions(llm, fact_sheet, captions, images_b64=images)
         final: dict[str, str] = {}
         for k in STYLE_ORDER:
             best = outcomes[k].final
             text = best.text.strip()
-            # A caption that never passed grounding, or reads like a template
-            # artifact, must not beat the vision-grounded draft.
-            usable = text and best.grounded and not text.startswith(("[", "("))
+            # Prefer the vision-grounded draft unless the SEV caption clears
+            # BOTH gates. Fact-sheet-only captions that pass grounding can
+            # still miss visual story beats the draft got right (observed
+            # accuracy drop from ~0.86 draft-heavy to ~0.84–0.85 SEV-heavy).
+            usable = (
+                text
+                and best.grounded
+                and best.lineup_passed
+                and not text.startswith(("[", "("))
+            )
             final[k] = text if usable else draft[k]
         meta = {
             "stage": "sev-verified",

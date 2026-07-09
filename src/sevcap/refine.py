@@ -101,7 +101,10 @@ def _feedback(attempt: CaptionAttempt, style_key: str) -> str:
 
 
 async def refine_captions(
-    llm: Gemma, fact_sheet: FactSheet, initial: dict[str, str]
+    llm: Gemma,
+    fact_sheet: FactSheet,
+    initial: dict[str, str],
+    images_b64: list[str] | None = None,
 ) -> dict[str, StyleOutcome]:
     """Gate + Self-Refine the 4-caption set; return best attempt per style."""
     captions = dict(initial)
@@ -133,6 +136,7 @@ async def refine_captions(
                 captions[style_key] = await generate_caption(
                     llm, fact_sheet, STYLES[style_key], feedback=fb,
                     seed=2000 + round_id * 10,
+                    images_b64=images_b64,
                 )
                 attempts_used[style_key] += 1
             except Exception as e:  # noqa: BLE001
