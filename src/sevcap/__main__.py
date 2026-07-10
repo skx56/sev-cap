@@ -11,10 +11,10 @@ import logging
 import sys
 
 
-def _run_pipeline() -> None:
+def _run_pipeline(input_dir: str | None = None, output_dir: str | None = None) -> None:
     from .pipeline import run
 
-    asyncio.run(run(None, None))
+    asyncio.run(run(input_dir, output_dir))
 
 
 def _write_fatal_placeholder(exc: BaseException) -> None:
@@ -39,7 +39,16 @@ if __name__ == "__main__":
         format="%(asctime)s %(name)s %(levelname)s %(message)s",
     )
     try:
-        if len(sys.argv) > 1:
+        # Most harnesses pass no args, but some pass input/output paths directly.
+        # Treat bare paths as pipeline args instead of letting Typer reject them.
+        if len(sys.argv) in (2, 3) and not sys.argv[1].startswith("-") and sys.argv[1] not in {
+            "run",
+            "check",
+            "facts",
+            "lineup-test",
+        }:
+            _run_pipeline(sys.argv[1], sys.argv[2] if len(sys.argv) == 3 else None)
+        elif len(sys.argv) > 1:
             from .cli import main
 
             main()
