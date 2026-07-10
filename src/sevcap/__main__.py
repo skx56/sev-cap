@@ -20,15 +20,25 @@ def _run_pipeline(input_dir: str | None = None, output_dir: str | None = None) -
 def _write_fatal_placeholder(exc: BaseException) -> None:
     """Best-effort output so the harness never sees a bare crash."""
     try:
-        from .io_contract import ResultWriter, find_output_dir
+        from .io_contract import ResultWriter, discover_tasks, find_input_dir, find_output_dir
         from .styles import STYLE_ORDER
 
-        writer = ResultWriter(find_output_dir(None))
-        writer.write(
-            "_fatal",
-            {k: "A short video clip." for k in STYLE_ORDER},
-            meta={"stage": "error", "error": str(exc)[:500]},
-        )
+        out_dir = find_output_dir(None)
+        try:
+            in_dir = find_input_dir(None)
+            tasks = discover_tasks(in_dir)
+            task_ids = [t.task_id for t in tasks] if tasks else ["_fatal"]
+        except Exception:  # noqa: BLE001
+            task_ids = ["_fatal"]
+
+        writer = ResultWriter(out_dir, task_order=task_ids)
+        placeholder = {k: "A short video clip." for k in STYLE_ORDER}
+        for task_id in task_ids:
+            writer.write(
+                task_id,
+                placeholder,
+                meta={"stage": "error", "error": str(exc)[:500]},
+            )
     except Exception:  # noqa: BLE001
         pass
 

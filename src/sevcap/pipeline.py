@@ -12,6 +12,7 @@ from __future__ import annotations
 import asyncio
 import logging
 import os
+import tempfile
 import time
 from dataclasses import dataclass
 from pathlib import Path
@@ -20,7 +21,14 @@ from .audio import transcribe_with_meta
 from .config import ClipProfile, clip_profile, settings
 from .fireworks import Gemma
 from .grounded import caption_all_styles, describe_scene, verify_description, write_styled_caption
-from .io_contract import ResultWriter, find_input_dir, find_output_dir, list_videos
+from .io_contract import (
+    ResultWriter,
+    discover_tasks,
+    download_video,
+    find_input_dir,
+    find_output_dir,
+    list_videos,
+)
 from .prejudge import score_caption_accuracy
 from .sampler import probe_duration, sample_keyframes
 from .styles import STYLE_ORDER, STYLES
@@ -52,24 +60,46 @@ class ClipState:
     description: str = ""
 
 
-async def _placeholder(writer: ResultWriter, clip_id: str) -> None:
+@dataclass
+class ClipJob:
+    task_id: str
+    video: Path
+
+
+async def _resolve_jobs(in_dir: Path) -> tuple[list[ClipJob], list[str]]:
+    tasks = discover_tasks(in_dir)
+    if tasks:
+        work = Path(tempfile.mkdtemp(prefix="sevcap_tasks_"))
+        jobs: list[ClipJob] = []
+        for task in tasks:
+            dest = work / f"{task.task_id}.mp4"
+            log.info("[%s] downloading %s", task.task_id, task.video_url)
+            await asyncio.to_thread(download_video, task.video_url, dest)
+            jobs.append(ClipJob(task_id=task.task_id, video=dest))
+        return jobs, [t.task_id for t in tasks]
+    videos = list_videos(in_dir)
+    return [ClipJob(task_id=v.stem, video=v) for v in videos], [v.stem for v in videos]
+
+
+async def _placeholder(writer: ResultWriter, task_id: str) -> None:
     writer.write(
-        clip_id,
+        task_id,
         {k: "A short video clip." for k in STYLE_ORDER},
         meta={"stage": "placeholder"},
     )
 
 
 async def _grounded_caption(
-    llm: Gemma, video: Path, writer: ResultWriter, state: ClipState | None = None,
+    llm: Gemma, job: ClipJob, writer: ResultWriter, state: ClipState | None = None,
 ) -> dict:
-    clip_id = video.stem
+    task_id = job.task_id
+    video = job.video
     try:
         profile = state.profile if state else clip_profile(probe_duration(str(video)))
 
         if state is None:
             log.info("[%s] sampling keyframes (duration=%.0fs, n=%d)",
-                     clip_id, profile.duration_s, profile.n_frames)
+                     task_id, profile.duration_s, profile.n_frames)
             frames_task = asyncio.to_thread(sample_keyframes, str(video), profile.n_frames)
             audio_task = asyncio.to_thread(transcribe_with_meta, str(video))
             frames, tr = await asyncio.gather(frames_task, audio_task)
@@ -80,16 +110,16 @@ async def _grounded_caption(
         else:
             frames = state.frames
 
-        log.info("[%s] describing scene", clip_id)
+        log.info("[%s] describing scene", task_id)
         draft_desc = await describe_scene(
             llm, frames, profile,
             transcript=state.transcript, transcript_trusted=state.transcript_trusted,
         )
-        log.info("[%s] verifying description", clip_id)
+        log.info("[%s] verifying description", task_id)
         description = await verify_description(llm, frames, draft_desc)
         state.description = description
 
-        log.info("[%s] writing styled captions", clip_id)
+        log.info("[%s] writing styled captions", task_id)
         captions = await caption_all_styles(llm, description)
 
         if POLISH_ENABLED:
@@ -100,12 +130,12 @@ async def _grounded_caption(
                             llm, str(video), style_key, captions[style_key], frames=frames,
                         )
                     except Exception as e:  # noqa: BLE001
-                        log.warning("[%s] polish score failed for %s: %s", clip_id, style_key, str(e)[:80])
+                        log.warning("[%s] polish score failed for %s: %s", task_id, style_key, str(e)[:80])
                         break
                     if score >= POLISH_MIN_SCORE:
                         break
                     log.info("[%s] polishing %s round %d (score=%d)",
-                             clip_id, style_key, polish_round + 1, score)
+                             task_id, style_key, polish_round + 1, score)
                     prior = [captions[k] for k in STYLE_ORDER if k != style_key]
                     try:
                         candidate = await write_styled_caption(
@@ -122,7 +152,7 @@ async def _grounded_caption(
                             captions[style_key] = candidate
                             score = new_score
                     except Exception as e:  # noqa: BLE001
-                        log.warning("[%s] polish failed for %s: %s", clip_id, style_key, str(e)[:100])
+                        log.warning("[%s] polish failed for %s: %s", task_id, style_key, str(e)[:100])
                         break
                     if score >= POLISH_MIN_SCORE:
                         break
@@ -134,47 +164,47 @@ async def _grounded_caption(
             "transcript_trusted": state.transcript_trusted,
             "grounding_description": description,
         }
-        writer.write(clip_id, captions, meta=meta)
-        log.info("[%s] grounded captioning complete", clip_id)
-        return {"clip": clip_id, "stage": "sev-verified"}
+        writer.write(task_id, captions, meta=meta)
+        log.info("[%s] grounded captioning complete", task_id)
+        return {"task_id": task_id, "stage": "sev-verified"}
     except Exception as e:  # noqa: BLE001
-        log.error("[%s] grounded caption failed: %s", clip_id, str(e)[:200])
+        log.error("[%s] grounded caption failed: %s", task_id, str(e)[:200])
         writer.write(
-            clip_id,
+            task_id,
             {k: "A short video clip." for k in STYLE_ORDER},
             meta={"stage": "draft", "error": str(e)[:300]},
         )
-        return {"clip": clip_id, "stage": "draft", "error": str(e)[:300]}
+        return {"task_id": task_id, "stage": "draft", "error": str(e)[:300]}
 
 
 async def process_clip(
-    llm: Gemma, video: Path, writer: ResultWriter, deadline: Deadline,
+    llm: Gemma, job: ClipJob, writer: ResultWriter, deadline: Deadline,
 ) -> dict:
-    clip_id = video.stem
-    await _placeholder(writer, clip_id)
+    task_id = job.task_id
+    await _placeholder(writer, task_id)
     if deadline.expired(reserve=30.0):
-        return {"clip": clip_id, "stage": "placeholder"}
-    budget = min(deadline.remaining(), clip_profile(probe_duration(str(video))).upgrade_timeout_s)
+        return {"task_id": task_id, "stage": "placeholder"}
+    budget = min(deadline.remaining(), clip_profile(probe_duration(str(job.video))).upgrade_timeout_s)
     try:
         return await asyncio.wait_for(
-            _grounded_caption(llm, video, writer), timeout=max(budget, 60.0),
+            _grounded_caption(llm, job, writer), timeout=max(budget, 60.0),
         )
     except asyncio.TimeoutError:
-        log.warning("[%s] grounded caption timed out after %.0fs", clip_id, budget)
+        log.warning("[%s] grounded caption timed out after %.0fs", task_id, budget)
         writer.write(
-            clip_id,
+            task_id,
             {k: "A short video clip." for k in STYLE_ORDER},
             meta={"stage": "draft", "error": "timeout"},
         )
-        return {"clip": clip_id, "stage": "draft", "error": "timeout"}
+        return {"task_id": task_id, "stage": "draft", "error": "timeout"}
     except Exception as e:  # noqa: BLE001
-        log.error("[%s] process_clip failed: %s", clip_id, str(e)[:200])
+        log.error("[%s] process_clip failed: %s", task_id, str(e)[:200])
         writer.write(
-            clip_id,
+            task_id,
             {k: "A short video clip." for k in STYLE_ORDER},
             meta={"stage": "draft", "error": str(e)[:300]},
         )
-        return {"clip": clip_id, "stage": "draft", "error": str(e)[:300]}
+        return {"task_id": task_id, "stage": "draft", "error": str(e)[:300]}
 
 
 async def run(input_dir: str | None = None, output_dir: str | None = None) -> dict:
@@ -195,24 +225,35 @@ async def run(input_dir: str | None = None, output_dir: str | None = None) -> di
         )
         return {"clips": 0, "stages": ["error"], "error": str(e)}
 
-    videos = list_videos(in_dir)
-    log.info("input=%s output=%s clips=%d", in_dir, out_dir, len(videos))
-    writer = ResultWriter(out_dir)
-    if not videos:
-        log.error("No video files in %s", in_dir)
+    try:
+        jobs, task_order = await _resolve_jobs(in_dir)
+    except Exception as e:  # noqa: BLE001
+        log.error("input resolution failed: %s", e)
+        writer = ResultWriter(out_dir)
+        writer.write(
+            "_fatal",
+            {k: "A short video clip." for k in STYLE_ORDER},
+            meta={"stage": "error", "error": str(e)[:300]},
+        )
+        return {"clips": 0, "stages": ["error"], "error": str(e)}
+
+    log.info("input=%s output=%s tasks=%d", in_dir, out_dir, len(jobs))
+    writer = ResultWriter(out_dir, task_order=task_order)
+    if not jobs:
+        log.error("No tasks or video files in %s", in_dir)
         writer.write(
             "_empty",
             {k: "A short video clip." for k in STYLE_ORDER},
-            meta={"stage": "error", "error": "no video files"},
+            meta={"stage": "error", "error": "no tasks or video files"},
         )
-        return {"clips": 0, "stages": ["error"], "error": "no video files"}
+        return {"clips": 0, "stages": ["error"], "error": "no tasks or video files"}
 
     llm = Gemma()
     deadline = Deadline(settings.time_budget_s)
     sem = asyncio.Semaphore(settings.clip_concurrency)
 
-    for v in videos:
-        await _placeholder(writer, v.stem)
+    for job in jobs:
+        await _placeholder(writer, job.task_id)
 
     try:
         model = await llm.resolve_text_model()
@@ -220,31 +261,31 @@ async def run(input_dir: str | None = None, output_dir: str | None = None) -> di
     except Exception as e:  # noqa: BLE001
         log.error("no reachable text model: %s", e)
 
-    async def one(v: Path) -> dict:
+    async def one(job: ClipJob) -> dict:
         async with sem:
             try:
-                return await process_clip(llm, v, writer, deadline)
+                return await process_clip(llm, job, writer, deadline)
             except Exception as e:  # noqa: BLE001
-                log.error("[%s] clip failed: %s", v.stem, e)
-                return {"clip": v.stem, "stage": "error", "error": str(e)}
+                log.error("[%s] clip failed: %s", job.task_id, e)
+                return {"task_id": job.task_id, "stage": "error", "error": str(e)}
 
-    results_list = await asyncio.gather(*(one(v) for v in videos))
-    by_stem = {r["clip"]: r for r in results_list}
+    results_list = await asyncio.gather(*(one(job) for job in jobs))
+    by_id = {r["task_id"]: r for r in results_list}
 
     for round_no in range(2):
-        failed = [v for v in videos if by_stem.get(v.stem, {}).get("stage") != "sev-verified"]
+        failed = [j for j in jobs if by_id.get(j.task_id, {}).get("stage") != "sev-verified"]
         if not failed or deadline.expired(reserve=60.0):
             break
-        log.warning("repair round %d: %s", round_no + 1, [v.stem for v in failed])
-        for r in await asyncio.gather(*(one(v) for v in failed)):
-            clip = r.get("clip")
-            if clip:
-                by_stem[clip] = r
+        log.warning("repair round %d: %s", round_no + 1, [j.task_id for j in failed])
+        for r in await asyncio.gather(*(one(j) for j in failed)):
+            task_id = r.get("task_id")
+            if task_id:
+                by_id[task_id] = r
 
-    results = [by_stem.get(v.stem, {"clip": v.stem, "stage": "error"}) for v in videos]
+    results = [by_id.get(j.task_id, {"task_id": j.task_id, "stage": "error"}) for j in jobs]
 
     summary = {
-        "clips": len(videos),
+        "clips": len(jobs),
         "stages": [r.get("stage") for r in results],
         "llm_usage": llm.usage.summary(),
     }
