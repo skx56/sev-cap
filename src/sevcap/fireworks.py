@@ -252,6 +252,10 @@ class Gemma:
                 last_err = e
                 self.usage.errors += 1
                 msg = str(e).lower()
+                # Permanent auth failure — retrying burns the harness time budget.
+                if status == 401 and any(s in msg for s in ("invalid", "unauthorized", "api key")):
+                    if "invalid" in msg or "api key you provided" in msg:
+                        raise
                 # Non-retriable: model can't take images -> caller may fall back.
                 if any(s in msg for s in ("image", "vision", "multimodal")) and any(
                     s in msg for s in ("not support", "unsupported", "invalid", "cannot")

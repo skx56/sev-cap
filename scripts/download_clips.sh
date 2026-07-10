@@ -31,8 +31,15 @@ fetch "https://download.blender.org/ED/ED_1024.avi" "$ED" || true
 # Big Buck Bunny: slow scenic intro / character interaction / fast action / climax
 trim "$BBB"  30  60 clips/bbb_intro_60s.mp4       # slow, scenic, few events
 trim "$BBB" 180  90 clips/bbb_middle_90s.mp4      # character interaction
+trim "$BBB" 150 110 clips/bbb_long_110s.mp4      # long mixed scene (eval head-to-head)
 trim "$BBB" 420  45 clips/bbb_action_45s.mp4      # fast action, many cuts
 trim "$BBB" 510  60 clips/bbb_climax_60s.mp4      # climax sequence
+
+# Duration benchmark set (35/60/90/120s) for head-to-head evals
+trim "$BBB"  90  35 clips/bbb_35s.mp4
+trim "$BBB"  30  60 clips/bbb_60s.mp4
+trim "$BBB" 180  90 clips/bbb_90s.mp4
+trim "$BBB"  30 120 clips/bbb_120s.mp4
 
 # Elephants Dream: dialogue-driven + surreal machinery scenes
 if [ -s "$ED" ]; then

@@ -83,8 +83,17 @@ def sample_keyframes(video: str, n_frames: int = 10, workdir: str | None = None)
     n_uniform = max(3, int(round(n_frames * 0.6)))
     n_scene = max(0, n_frames - n_uniform)
 
-    # uniform: midpoints of equal segments avoids black first/last frames
-    uniform_ts = [duration * (i + 0.5) / n_uniform for i in range(n_uniform)]
+    if duration <= 45:
+        # Short clips: segment midpoints (best accuracy in evals).
+        uniform_ts = [duration * (i + 0.5) / n_uniform for i in range(n_uniform)]
+    else:
+        # Longer clips: Raccoon-style 5% edge padding avoids black intro/outro.
+        pad = duration * 0.05
+        span = max(duration - 2 * pad, duration * 0.5)
+        if n_uniform == 1:
+            uniform_ts = [pad + span / 2]
+        else:
+            uniform_ts = [pad + i * span / (n_uniform - 1) for i in range(n_uniform)]
     scene_ts = _scene_change_times(video, n_scene) if n_scene else []
 
     # dedupe: drop scene frames within 1s of a uniform frame

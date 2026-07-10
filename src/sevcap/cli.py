@@ -77,25 +77,34 @@ def facts(
     k: int = typer.Option(None, "--k", help="Number of extraction samples"),
 ):
     """Debug: run Stage 1 + semantic-entropy verification on one clip."""
-    from .audio import transcribe
-    from .config import settings
+    from .audio import transcribe_with_meta
+    from .speech_filter import filter_speech_facts
+    from .config import clip_profile, settings
     from .entropy import verify_facts
     from .extractor import extract_facts
     from .fireworks import Gemma
-    from .sampler import sample_keyframes
+    from .sampler import probe_duration, sample_keyframes
 
     async def _facts():
         llm = Gemma()
         await llm.resolve_text_model()
-        frames = sample_keyframes(video, settings.n_frames)
-        console.print(f"Sampled {len(frames)} keyframes")
-        transcript = transcribe(video)
-        if transcript:
-            console.print(f"Audio transcript: {transcript!r}")
-        extractions = await extract_facts(
-            llm, frames, k=k or settings.k_samples, transcript=transcript
+        profile = clip_profile(probe_duration(video))
+        frames = sample_keyframes(video, profile.n_frames)
+        console.print(
+            f"Sampled {len(frames)} keyframes (duration={profile.duration_s:.0f}s)"
         )
-        sheet = await verify_facts(llm, extractions, settings.min_support)
+        tr = transcribe_with_meta(video)
+        if tr.text:
+            console.print(f"Audio transcript (trusted={tr.trusted}): {tr.text!r}")
+        extractions = await extract_facts(
+            llm, frames, k=k or settings.k_samples,
+            transcript=tr.text, transcript_trusted=tr.trusted,
+            duration_s=profile.duration_s,
+        )
+        sheet = filter_speech_facts(
+            await verify_facts(llm, extractions, settings.min_support),
+            tr.trusted,
+        )
         console.print_json(json.dumps(sheet.report()))
 
     asyncio.run(_facts())

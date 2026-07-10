@@ -8,6 +8,9 @@ results/
 clips/*
 !clips/.gitkeep
 eval/out/
+eval/compare_repos.py
+eval/compare_raccoon.py
+eval/raccoon_runner.py
 .pytest_cache/
 dist/
 build/

@@ -1,37 +1,34 @@
-"""Anytime orchestrator.
+"""Anytime orchestrator — grounded describe → verify → style-write pipeline.
 
-Per clip, two phases:
-  Phase 1 (fast): single-pass draft of all 4 styles straight from frames,
-  written to disk IMMEDIATELY. From this moment the clip has valid output.
-  Phase 2 (SEV upgrade): K-sample extraction -> semantic-entropy verification
-  -> fact-conditioned generation -> grounding gate + blind lineup ->
-  Self-Refine, atomically overwriting the draft when it survives the gates.
-
-A global time budget guards the whole run: if the harness kills the container
-or the budget expires mid-upgrade, every clip already has its best output so
-far — degraded gracefully, never missing.
+Phase 1 writes placeholder output immediately. Phase 2 runs the Raccoon-style
+grounded path (describe frames, self-verify, write 4 styles from one shared
+description) plus a light accuracy polish pass. Simple and reliable: ~10 LLM
+calls/clip instead of 30+ through semantic-entropy gates that often fell back
+to unverified drafts.
 """
 
 from __future__ import annotations
 
 import asyncio
 import logging
+import os
 import time
 from dataclasses import dataclass
 from pathlib import Path
 
-from .audio import transcribe
-from .config import settings
-from .entropy import verify_facts
-from .extractor import extract_facts
+from .audio import transcribe_with_meta
+from .config import ClipProfile, clip_profile, settings
 from .fireworks import Gemma
-from .generator import generate_caption, generate_draft
+from .grounded import caption_all_styles, describe_scene, verify_description, write_styled_caption
 from .io_contract import ResultWriter, find_input_dir, find_output_dir, list_videos
-from .refine import refine_captions
-from .sampler import sample_keyframes
+from .prejudge import score_caption_accuracy
+from .sampler import probe_duration, sample_keyframes
 from .styles import STYLE_ORDER, STYLES
 
 log = logging.getLogger("sevcap.pipeline")
+
+POLISH_MIN_SCORE = 4
+POLISH_ENABLED = os.environ.get("SEVCAP_POLISH", "1") not in ("0", "false", "no")
 
 
 class Deadline:
@@ -47,271 +44,204 @@ class Deadline:
 
 
 @dataclass
-class DraftResult:
+class ClipState:
     frames: list
+    profile: ClipProfile
     transcript: str
-    draft: dict[str, str]
+    transcript_trusted: bool
+    description: str = ""
 
 
-async def draft_phase(llm: Gemma, video: Path, writer: ResultWriter) -> DraftResult:
-    """Phase 1 only: cheap, fast, run for every clip before any Phase 2 work.
-
-    Decoupled from Phase 2 so a slow-to-upgrade clip can never prevent other
-    clips from getting their immediate draft coverage (see module docstring).
-    """
-    clip_id = video.stem
-    log.info("[%s] sampling keyframes", clip_id)
-    frames_task = asyncio.to_thread(sample_keyframes, str(video), settings.n_frames)
-    audio_task = asyncio.to_thread(transcribe, str(video))
-    frames, transcript = await asyncio.gather(frames_task, audio_task)
-    images = [f.b64() for f in frames]
-    if transcript:
-        log.info("[%s] audio transcript (%d chars): %s", clip_id, len(transcript), transcript[:100])
-
-    draft = None
-    for attempt in range(2):
-        try:
-            draft = await generate_draft(llm, images, transcript=transcript)
-            break
-        except Exception as e:  # noqa: BLE001
-            log.warning("[%s] draft attempt %d failed: %s", clip_id, attempt + 1, str(e)[:150])
-    if draft is None:
-        draft = {k: "A short video clip." for k in STYLE_ORDER}
-    writer.write(clip_id, draft, meta={"stage": "draft", "keyframes": len(frames)})
-    return DraftResult(frames=frames, transcript=transcript, draft=draft)
+async def _placeholder(writer: ResultWriter, clip_id: str) -> None:
+    writer.write(
+        clip_id,
+        {k: "A short video clip." for k in STYLE_ORDER},
+        meta={"stage": "placeholder"},
+    )
 
 
-async def upgrade_phase(
-    llm: Gemma, video: Path, writer: ResultWriter, deadline: Deadline, pre: DraftResult
+async def _grounded_caption(
+    llm: Gemma, video: Path, writer: ResultWriter, state: ClipState | None = None,
 ) -> dict:
     clip_id = video.stem
-    frames, transcript, draft = pre.frames, pre.transcript, pre.draft
-
-    if deadline.expired(reserve=60.0):
-        log.warning("[%s] budget exhausted before SEV upgrade; keeping draft", clip_id)
-        return {"clip": clip_id, "stage": "draft"}
-
-    # ---- Phase 2: full SEV upgrade
     try:
-        extractions = await extract_facts(llm, frames, k=settings.k_samples, transcript=transcript)
-        # Semantic entropy needs independent samples to agree; below 2 there
-        # is no consensus signal and "verification" is noise. Scaled to
-        # k_samples (not a fixed 3) since K itself is now as low as 3 and
-        # requiring 3-of-3 successes here would defeat the point of lowering
-        # K for reliability in the first place.
-        min_needed = min(2, settings.k_samples)
-        if len(extractions) < min_needed:
-            raise RuntimeError(f"only {len(extractions)} extraction samples succeeded")
-        fact_sheet = await verify_facts(llm, extractions, settings.min_support)
-        if not fact_sheet.verified:
-            # Never caption from an empty sheet (the generator would write
-            # meta-captions about missing facts). Keep the visual draft.
-            raise RuntimeError("empty fact sheet after verification")
+        profile = state.profile if state else clip_profile(probe_duration(str(video)))
 
-        # Persist the verification report the moment it exists, alongside the
-        # current draft captions. If generation/refine below is later killed by
-        # the per-clip or global timeout, the verified/rejected facts still
-        # survive on disk (and in the demo UI) instead of being lost.
-        writer.write(
-            clip_id,
-            draft,
-            meta={
-                "stage": "facts-verified",
-                "keyframes": len(frames),
-                "fact_verification": fact_sheet.report(),
-            },
-        )
-
-        captions: dict[str, str] = {}
-        images = [f.b64() for f in frames]
-        results = await asyncio.gather(
-            *(generate_caption(llm, fact_sheet, STYLES[k], seed=100 + i, images_b64=images)
-              for i, k in enumerate(STYLE_ORDER)),
-            return_exceptions=True,
-        )
-        for k, res in zip(STYLE_ORDER, results):
-            ok = not isinstance(res, Exception) and str(res).strip()
-            captions[k] = str(res).strip() if ok else draft[k]
-
-        outcomes = await refine_captions(llm, fact_sheet, captions, images_b64=images)
-        final: dict[str, str] = {}
-        for k in STYLE_ORDER:
-            best = outcomes[k].final
-            text = best.text.strip()
-            # Prefer the vision-grounded draft unless the SEV caption clears
-            # BOTH gates. Fact-sheet-only captions that pass grounding can
-            # still miss visual story beats the draft got right (observed
-            # accuracy drop from ~0.86 draft-heavy to ~0.84–0.85 SEV-heavy).
-            usable = (
-                text
-                and best.grounded
-                and best.lineup_passed
-                and not text.startswith(("[", "("))
+        if state is None:
+            log.info("[%s] sampling keyframes (duration=%.0fs, n=%d)",
+                     clip_id, profile.duration_s, profile.n_frames)
+            frames_task = asyncio.to_thread(sample_keyframes, str(video), profile.n_frames)
+            audio_task = asyncio.to_thread(transcribe_with_meta, str(video))
+            frames, tr = await asyncio.gather(frames_task, audio_task)
+            state = ClipState(
+                frames=frames, profile=profile,
+                transcript=tr.text, transcript_trusted=tr.trusted,
             )
-            final[k] = text if usable else draft[k]
+        else:
+            frames = state.frames
+
+        log.info("[%s] describing scene", clip_id)
+        draft_desc = await describe_scene(
+            llm, frames, profile,
+            transcript=state.transcript, transcript_trusted=state.transcript_trusted,
+        )
+        log.info("[%s] verifying description", clip_id)
+        description = await verify_description(llm, frames, draft_desc)
+        state.description = description
+
+        log.info("[%s] writing styled captions", clip_id)
+        captions = await caption_all_styles(llm, description)
+
+        if POLISH_ENABLED:
+            for style_key in STYLE_ORDER:
+                for polish_round in range(2):
+                    try:
+                        score = await score_caption_accuracy(
+                            llm, str(video), style_key, captions[style_key], frames=frames,
+                        )
+                    except Exception as e:  # noqa: BLE001
+                        log.warning("[%s] polish score failed for %s: %s", clip_id, style_key, str(e)[:80])
+                        break
+                    if score >= POLISH_MIN_SCORE:
+                        break
+                    log.info("[%s] polishing %s round %d (score=%d)",
+                             clip_id, style_key, polish_round + 1, score)
+                    prior = [captions[k] for k in STYLE_ORDER if k != style_key]
+                    try:
+                        candidate = await write_styled_caption(
+                            llm, description, STYLES[style_key], prior,
+                            feedback=(
+                                f"The previous caption scored {score}/5 on factual accuracy. "
+                                "Stay closer to the description; do not invent events or objects."
+                            ),
+                        )
+                        new_score = await score_caption_accuracy(
+                            llm, str(video), style_key, candidate, frames=frames,
+                        )
+                        if new_score >= score:
+                            captions[style_key] = candidate
+                            score = new_score
+                    except Exception as e:  # noqa: BLE001
+                        log.warning("[%s] polish failed for %s: %s", clip_id, style_key, str(e)[:100])
+                        break
+                    if score >= POLISH_MIN_SCORE:
+                        break
+
         meta = {
             "stage": "sev-verified",
             "keyframes": len(frames),
-            "fact_verification": fact_sheet.report(),
-            "style_gates": {k: outcomes[k].report() for k in STYLE_ORDER},
+            "duration_s": profile.duration_s,
+            "transcript_trusted": state.transcript_trusted,
+            "grounding_description": description,
         }
-        writer.write(clip_id, final, meta=meta)
-        log.info("[%s] SEV upgrade complete", clip_id)
+        writer.write(clip_id, captions, meta=meta)
+        log.info("[%s] grounded captioning complete", clip_id)
         return {"clip": clip_id, "stage": "sev-verified"}
     except Exception as e:  # noqa: BLE001
-        log.warning("[%s] SEV upgrade failed (%s); draft output stands", clip_id, e)
-        return {"clip": clip_id, "stage": "draft", "error": str(e)}
-
-
-async def _upgrade_with_cap(
-    llm: Gemma, video: Path, writer: ResultWriter, deadline: Deadline, pre: DraftResult
-) -> dict:
-    """Run upgrade_phase under a hard per-clip time cap.
-
-    Bounds Phase 2 (extraction + verification + gates + refine) to
-    settings.clip_upgrade_timeout_s (also capped by whatever remains of the
-    global deadline) so one clip stuck retrying a degenerating model can
-    never consume the whole run's time budget — it just falls back to its
-    already-written draft. Composes with (does not replace) the global
-    Deadline: the global deadline still shrinks per_clip_budget below the
-    timeout as the run's overall time runs out.
-    """
-    clip_id = video.stem
-    per_clip_budget = min(deadline.remaining(), settings.clip_upgrade_timeout_s)
-    if per_clip_budget <= 0:
-        return {"clip": clip_id, "stage": "draft"}
-    try:
-        return await asyncio.wait_for(
-            upgrade_phase(llm, video, writer, deadline, pre), timeout=per_clip_budget
+        log.error("[%s] grounded caption failed: %s", clip_id, str(e)[:200])
+        writer.write(
+            clip_id,
+            {k: "A short video clip." for k in STYLE_ORDER},
+            meta={"stage": "draft", "error": str(e)[:300]},
         )
-    except asyncio.TimeoutError:
-        log.warning("[%s] upgrade timed out after %.0fs; keeping draft",
-                    clip_id, per_clip_budget)
-        return {"clip": clip_id, "stage": "draft", "error": "upgrade-timeout"}
+        return {"clip": clip_id, "stage": "draft", "error": str(e)[:300]}
 
 
 async def process_clip(
-    llm: Gemma, video: Path, writer: ResultWriter, deadline: Deadline
+    llm: Gemma, video: Path, writer: ResultWriter, deadline: Deadline,
 ) -> dict:
-    """Single-clip convenience wrapper (draft phase, then capped SEV upgrade).
-
-    Used by callers that only ever process one clip at a time and don't need
-    the batch run()'s cross-clip draft/upgrade decoupling — e.g. the
-    Streamlit demo, or ad-hoc scripts/tests.
-    """
-    pre = await draft_phase(llm, video, writer)
-    if deadline.expired(reserve=60.0):
-        log.warning("[%s] budget exhausted before SEV upgrade; keeping draft", video.stem)
-        return {"clip": video.stem, "stage": "draft"}
-    return await _upgrade_with_cap(llm, video, writer, deadline, pre)
+    clip_id = video.stem
+    await _placeholder(writer, clip_id)
+    if deadline.expired(reserve=30.0):
+        return {"clip": clip_id, "stage": "placeholder"}
+    budget = min(deadline.remaining(), clip_profile(probe_duration(str(video))).upgrade_timeout_s)
+    try:
+        return await asyncio.wait_for(
+            _grounded_caption(llm, video, writer), timeout=max(budget, 60.0),
+        )
+    except asyncio.TimeoutError:
+        log.warning("[%s] grounded caption timed out after %.0fs", clip_id, budget)
+        writer.write(
+            clip_id,
+            {k: "A short video clip." for k in STYLE_ORDER},
+            meta={"stage": "draft", "error": "timeout"},
+        )
+        return {"clip": clip_id, "stage": "draft", "error": "timeout"}
+    except Exception as e:  # noqa: BLE001
+        log.error("[%s] process_clip failed: %s", clip_id, str(e)[:200])
+        writer.write(
+            clip_id,
+            {k: "A short video clip." for k in STYLE_ORDER},
+            meta={"stage": "draft", "error": str(e)[:300]},
+        )
+        return {"clip": clip_id, "stage": "draft", "error": str(e)[:300]}
 
 
 async def run(input_dir: str | None = None, output_dir: str | None = None) -> dict:
     logging.basicConfig(
         level=logging.INFO, format="%(asctime)s %(name)s %(levelname)s %(message)s"
     )
-    in_dir = find_input_dir(input_dir)
-    out_dir = find_output_dir(output_dir)
+    try:
+        in_dir = find_input_dir(input_dir)
+        out_dir = find_output_dir(output_dir)
+    except Exception as e:  # noqa: BLE001
+        log.error("I/O setup failed: %s", e)
+        out_dir = find_output_dir(output_dir)
+        writer = ResultWriter(out_dir)
+        writer.write(
+            "_fatal",
+            {k: "A short video clip." for k in STYLE_ORDER},
+            meta={"stage": "error", "error": str(e)[:300]},
+        )
+        return {"clips": 0, "stages": ["error"], "error": str(e)}
+
     videos = list_videos(in_dir)
     log.info("input=%s output=%s clips=%d", in_dir, out_dir, len(videos))
+    writer = ResultWriter(out_dir)
     if not videos:
-        raise FileNotFoundError(f"No video files in {in_dir}")
+        log.error("No video files in %s", in_dir)
+        writer.write(
+            "_empty",
+            {k: "A short video clip." for k in STYLE_ORDER},
+            meta={"stage": "error", "error": "no video files"},
+        )
+        return {"clips": 0, "stages": ["error"], "error": "no video files"}
 
     llm = Gemma()
-    writer = ResultWriter(out_dir)
     deadline = Deadline(settings.time_budget_s)
-    clip_sem = asyncio.Semaphore(settings.clip_concurrency)
+    sem = asyncio.Semaphore(settings.clip_concurrency)
 
-    # OUTPUT_MISSING defense, layer 0: every clip has (placeholder) output on
-    # disk before any processing starts; everything after only upgrades it.
     for v in videos:
-        writer.write(v.stem, {k: "A short video clip." for k in STYLE_ORDER},
-                     meta={"stage": "placeholder"})
+        await _placeholder(writer, v.stem)
 
     try:
         model = await llm.resolve_text_model()
         log.info("text model resolved: %s", model)
     except Exception as e:  # noqa: BLE001
         log.error("no reachable text model: %s", e)
-    try:
-        vision = await llm.check_vision()
-        log.info("vision model resolved: %s", vision)
-    except Exception as e:  # noqa: BLE001
-        log.error("no vision model available: %s", e)
 
-    # ---- Phase 1 for EVERY clip first (before any Phase 2). Bounded by the
-    # same clip_concurrency semaphore. Do NOT wrap drafts in asyncio.wait_for:
-    # cancelling an in-flight Kimi multi-image call mid-response leaves
-    # truncated JSON and wastes the work; the HTTP client timeout + draft
-    # retries already bound hang risk without aborting a nearly-done call.
-    async def guarded_draft(v: Path) -> tuple[Path, DraftResult | None]:
-        async with clip_sem:
+    async def one(v: Path) -> dict:
+        async with sem:
             try:
-                return v, await draft_phase(llm, v, writer)
+                return await process_clip(llm, v, writer, deadline)
             except Exception as e:  # noqa: BLE001
-                log.error("[%s] draft phase failed entirely: %s", v.stem, e)
-                writer.write(v.stem, {k: "A short video clip." for k in STYLE_ORDER},
-                             meta={"stage": "error", "error": str(e)})
-                return v, None
+                log.error("[%s] clip failed: %s", v.stem, e)
+                return {"clip": v.stem, "stage": "error", "error": str(e)}
 
-    draft_pairs = await asyncio.gather(*(guarded_draft(v) for v in videos))
-    drafts: dict[Path, DraftResult] = {v: d for v, d in draft_pairs if d is not None}
-    best: dict[str, dict] = {
-        v.stem: {"clip": v.stem, "stage": "draft" if v in drafts else "error"}
-        for v in videos
-    }
+    results_list = await asyncio.gather(*(one(v) for v in videos))
+    by_stem = {r["clip"]: r for r in results_list}
 
-    # ---- Phase 2: SEV upgrades, bounded by clip_concurrency AND a per-clip
-    # timeout so one stuck clip can only ever hold up its own concurrency
-    # slot for a bounded time, never the whole remaining budget.
-    async def guarded_upgrade(v: Path) -> dict:
-        pre = drafts.get(v)
-        if pre is None:
-            return best[v.stem]
-        async with clip_sem:
-            try:
-                return await _upgrade_with_cap(llm, v, writer, deadline, pre)
-            except Exception as e:  # noqa: BLE001
-                log.error("[%s] clip upgrade failed entirely: %s", v.stem, e)
-                return {"clip": v.stem, "stage": "draft", "error": str(e)}
-
-    async def one_pass(targets: list[Path]) -> list[dict]:
-        return await asyncio.gather(*(guarded_upgrade(v) for v in targets))
-
-    # Repair loop: transient provider outages (rate-limit storms, spurious
-    # 401 windows) can sink a whole pass. While budget remains, re-attempt
-    # every clip that did not reach sev-verified — including clips whose
-    # first draft timed out (re-run draft, then upgrade).
-    targets = [v for v in videos if best[v.stem].get("stage") != "sev-verified"]
-    for round_no in range(3):
-        if not targets or deadline.expired(reserve=60.0):
+    for round_no in range(2):
+        failed = [v for v in videos if by_stem.get(v.stem, {}).get("stage") != "sev-verified"]
+        if not failed or deadline.expired(reserve=60.0):
             break
-        # Re-draft any clip that never got a DraftResult (timeout/error).
-        missing = [v for v in targets if v not in drafts]
-        if missing:
-            log.warning("repair round %d: re-drafting %s",
-                        round_no + 1, [v.stem for v in missing])
-            redraft = await asyncio.gather(*(guarded_draft(v) for v in missing))
-            for v, d in redraft:
-                if d is not None:
-                    drafts[v] = d
-                    best[v.stem] = {"clip": v.stem, "stage": "draft"}
-        upgrade_targets = [v for v in targets if v in drafts]
-        if not upgrade_targets:
-            break
-        round_results = await one_pass(upgrade_targets)
-        for r in round_results:
+        log.warning("repair round %d: %s", round_no + 1, [v.stem for v in failed])
+        for r in await asyncio.gather(*(one(v) for v in failed)):
             clip = r.get("clip")
-            if clip and (r.get("stage") == "sev-verified"
-                         or best[clip].get("stage") != "sev-verified"):
-                best[clip] = r
-        targets = [v for v in videos if best[v.stem].get("stage") != "sev-verified"]
-        if not targets or deadline.expired(reserve=180.0):
-            break
-        log.warning("repair round %d: retrying %s",
-                    round_no + 1, [v.stem for v in targets])
-        await asyncio.sleep(min(60.0, max(deadline.remaining() * 0.05, 5.0)))
-    results = list(best.values())
+            if clip:
+                by_stem[clip] = r
+
+    results = [by_stem.get(v.stem, {"clip": v.stem, "stage": "error"}) for v in videos]
 
     summary = {
         "clips": len(videos),

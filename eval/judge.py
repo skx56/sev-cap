@@ -12,8 +12,9 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).parent.parent / "src"))
 
+from sevcap.config import clip_profile  # noqa: E402
 from sevcap.fireworks import Gemma, extract_json  # noqa: E402
-from sevcap.sampler import sample_keyframes  # noqa: E402
+from sevcap.sampler import probe_duration, sample_keyframes  # noqa: E402
 
 JUDGE_PROMPT = """You are an impartial judge grading video captions on two axes.
 
@@ -38,7 +39,7 @@ the JSON:
 
 
 async def judge_clip(llm: Gemma, video: str, captions: dict[str, str]) -> dict:
-    frames = sample_keyframes(video, 8)
+    frames = sample_keyframes(video, clip_profile(probe_duration(video)).n_frames)
     images = [f.b64() for f in frames]
     prompt = JUDGE_PROMPT.format(n=len(images), **captions)
     last_err: Exception | None = None

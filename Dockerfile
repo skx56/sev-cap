@@ -23,6 +23,8 @@ RUN python -c "from faster_whisper import WhisperModel; WhisperModel('base', dev
 ENV INPUT_DIR=/input \
     OUTPUT_DIR=/output \
     SEVCAP_CACHE=0 \
+    SEVCAP_AUDIO=0 \
+    SEVCAP_POLISH=1 \
     SEVCAP_MODEL="accounts/fireworks/models/kimi-k2p6" \
     SEVCAP_VISION_MODEL="accounts/fireworks/models/kimi-k2p6" \
     PYTHONUNBUFFERED=1
