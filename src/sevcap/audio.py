@@ -16,13 +16,50 @@ from __future__ import annotations
 
 import logging
 import os
+import re
 import subprocess
 import tempfile
+from dataclasses import dataclass
 
 log = logging.getLogger("sevcap.audio")
 
 _model = None
 _MIN_WAV_BYTES = 2000  # smaller than this is silence/empty-track noise
+
+
+@dataclass
+class TranscriptResult:
+    text: str
+    trusted: bool
+    reason: str = ""
+
+
+def assess_transcript_quality(text: str) -> tuple[bool, str]:
+    """Heuristic trust gate for Whisper output before it becomes facts."""
+    if not text or len(text.strip()) < 3:
+        return False, "empty"
+    t = text.strip()
+    words = t.split()
+    if len(words) < 2:
+        return False, "too-short"
+    # Garbled ASR: heavy stutter / repetition ("you, you see, you see")
+    if re.search(r"\b(\w+),\s*\1\b", t, re.I):
+        return False, "stutter-repeat"
+    uniq = len(set(w.lower() for w in words))
+    if len(words) >= 8 and uniq / len(words) < 0.45:
+        return False, "repetitive"
+    # Run-on without sentence structure often means bad segmentation
+    if len(t) > 120 and t.count(".") + t.count("?") + t.count("!") == 0:
+        return False, "unpunctuated-runon"
+    return True, "ok"
+
+
+def transcribe_with_meta(video: str) -> TranscriptResult:
+    text = transcribe(video)
+    trusted, reason = assess_transcript_quality(text)
+    if text and not trusted:
+        log.info("transcript rejected for fact use (%s): %s", reason, text[:80])
+    return TranscriptResult(text=text, trusted=trusted, reason=reason)
 
 
 def _get_model():
