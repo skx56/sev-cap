@@ -20,14 +20,12 @@ from .audio import transcribe_with_meta
 from .config import ClipProfile, clip_profile, settings
 from .fireworks import Gemma
 from .grounded import (
-    _invents_foreign,
     _style_ok,
-    _too_similar,
     caption_all_styles,
     describe_scene,
+    draft_style_candidates,
     safe_style_caption,
     verify_description,
-    write_styled_caption,
 )
 from .io_contract import (
     ResultWriter,
@@ -40,7 +38,7 @@ from .io_contract import (
     list_videos,
     load_tasks,
 )
-from .prejudge import score_caption_accuracy
+from .prejudge import score_caption_accuracy  # noqa: F401  # public re-export for tests
 from .sampler import probe_duration, sample_keyframes
 from .styles import STYLE_ORDER, STYLES
 
@@ -172,92 +170,55 @@ async def _grounded_caption(
         description = await verify_description(llm, frames, draft_desc)
         state.description = description
 
-        log.info("[%s] writing styled captions", task_id)
-        captions = await caption_all_styles(llm, description, styles=job.styles)
+        log.info("[%s] writing styled captions (multi-candidate)", task_id)
+        captions = await caption_all_styles(
+            llm, description, styles=job.styles, video=str(video), frames=frames,
+        )
 
+        # Light second pass only for styles still below the accuracy floor.
         if POLISH_ENABLED and deadline.remaining() > POLISH_MIN_REMAINING_S:
+            from .prejudge import pick_best_candidate, score_caption_axes
+
             formal_anchor = captions.get("formal", "")
-            # Polish weaker styles first — accuracy failures concentrate there.
             polish_order = [k for k in ("sarcastic", "humorous_tech", "humorous_non_tech", "formal")
                             if k in job.styles]
             for style_key in polish_order:
-                best = captions[style_key]
-                best_score = 0
-                for polish_round in range(max(0, POLISH_MAX_ROUNDS)):
-                    if deadline.expired(reserve=POLISH_MIN_REMAINING_S):
-                        break
-                    try:
-                        score = await score_caption_accuracy(
-                            llm, str(video), style_key, best, frames=frames,
-                        )
-                    except Exception as e:  # noqa: BLE001
-                        log.warning("[%s] polish score failed for %s: %s", task_id, style_key, str(e)[:80])
-                        break
-                    best_score = max(best_score, score)
-                    if score >= POLISH_MIN_SCORE:
-                        break
-                    log.info("[%s] polishing %s round %d (score=%d)",
-                             task_id, style_key, polish_round + 1, score)
-                    prior = [captions[k] for k in job.styles if k != style_key and captions.get(k)]
-                    try:
-                        candidate = await write_styled_caption(
-                            llm, description, STYLES[style_key], prior,
-                            formal_anchor=formal_anchor or None,
-                            feedback=(
-                                f"Previous caption scored {score}/5 on factual accuracy. "
-                                "Remove invented events/objects. Use ONLY facts from the "
-                                "description and formal caption. Keep the style voice."
-                            ),
-                        )
-                        new_score = await score_caption_accuracy(
-                            llm, str(video), style_key, candidate, frames=frames,
-                        )
-                        if new_score >= score:
-                            best = candidate
-                            best_score = new_score
-                            score = new_score
-                    except Exception as e:  # noqa: BLE001
-                        log.warning("[%s] polish failed for %s: %s", task_id, style_key, str(e)[:100])
-                        break
-                    if score >= POLISH_MIN_SCORE:
-                        break
-                if best_score < POLISH_MIN_SCORE and style_key != "formal" and formal_anchor:
-                    try:
-                        safe = await safe_style_caption(
-                            llm, description, STYLES[style_key], formal_anchor,
-                        )
-                        safe_score = await score_caption_accuracy(
-                            llm, str(video), style_key, safe, frames=frames,
-                        )
-                        # Prefer safe only if accuracy improves AND style didn't collapse.
-                        if (
-                            safe_score >= best_score
-                            and _style_ok(style_key, safe, formal_anchor, description)
-                        ):
-                            best = safe
-                            best_score = safe_score
-                            log.info("[%s] used safe fallback for %s (score=%d)",
-                                     task_id, style_key, safe_score)
-                    except Exception as e:  # noqa: BLE001
-                        log.warning("[%s] safe fallback failed for %s: %s",
-                                    task_id, style_key, str(e)[:100])
-                # Never keep a formal-clone for non-formal styles.
-                if (
-                    style_key != "formal"
-                    and formal_anchor
-                    and (
-                        _too_similar(best, formal_anchor)
-                        or _invents_foreign(best, description)
+                if deadline.expired(reserve=POLISH_MIN_REMAINING_S):
+                    break
+                try:
+                    acc, tone = await score_caption_axes(
+                        llm, str(video), style_key, captions[style_key], frames=frames,
                     )
-                ):
-                    try:
-                        best = await safe_style_caption(
-                            llm, description, STYLES[style_key], formal_anchor,
-                        )
-                        log.info("[%s] replaced bad-style caption for %s", task_id, style_key)
-                    except Exception:  # noqa: BLE001
-                        pass
-                captions[style_key] = best
+                except Exception as e:  # noqa: BLE001
+                    log.warning("[%s] polish score failed for %s: %s", task_id, style_key, str(e)[:80])
+                    continue
+                if acc >= 4 and tone >= 4:
+                    continue
+                # Only burn reselect budget on clearly weak captions.
+                if acc >= POLISH_MIN_SCORE and tone >= 3:
+                    continue
+                log.info("[%s] reselecting %s (acc=%d tone=%d)", task_id, style_key, acc, tone)
+                prior = [captions[k] for k in job.styles if k != style_key and captions.get(k)]
+                try:
+                    extra = await draft_style_candidates(
+                        llm, description, STYLES[style_key], prior, formal_anchor or None,
+                        include_safe=True,
+                    )
+                    pool = [captions[style_key], *extra]
+
+                    def _valid(cap: str, _key=style_key, _formal=formal_anchor) -> bool:
+                        return _style_ok(_key, cap, _formal if _key != "formal" else None, description)
+
+                    best, new_acc, new_tone = await pick_best_candidate(
+                        llm, str(video), style_key, pool, frames=frames, is_valid=_valid,
+                    )
+                    if best and (new_acc > acc or (new_acc == acc and new_tone >= tone)):
+                        captions[style_key] = best
+                        if style_key == "formal":
+                            formal_anchor = best
+                        log.info("[%s] selected %s acc=%d tone=%d", task_id, style_key, new_acc, new_tone)
+                except Exception as e:  # noqa: BLE001
+                    log.warning("[%s] reselect failed for %s: %s", task_id, style_key, str(e)[:100])
 
         meta = {
             "stage": "sev-verified",
