@@ -21,6 +21,13 @@ from typing import Any
 
 log = logging.getLogger("sevcap.io")
 
+REQUIRED_STYLES = (
+    "formal",
+    "sarcastic",
+    "humorous_tech",
+    "humorous_non_tech",
+)
+
 VIDEO_EXTS = {".mp4", ".mov", ".mkv", ".avi", ".webm", ".m4v", ".mpg", ".mpeg"}
 
 INPUT_ENV_VARS = (
@@ -233,6 +240,21 @@ def discover_tasks(input_dir: Path) -> list[VideoTask] | None:
     return load_tasks(tasks_path)
 
 
+def empty_captions(styles: list[str] | None = None) -> dict[str, str]:
+    keys = styles or list(REQUIRED_STYLES)
+    return {k: "" for k in keys if k in REQUIRED_STYLES}
+
+
+def normalize_captions(captions: dict[str, str], styles: list[str] | None = None) -> dict[str, str]:
+    """Ensure every required style key exists with a string value."""
+    keys = styles or list(REQUIRED_STYLES)
+    out = empty_captions(keys)
+    for key in out:
+        val = captions.get(key, "")
+        out[key] = val if isinstance(val, str) else str(val)
+    return out
+
+
 def download_video(url: str, dest: Path) -> None:
     dest.parent.mkdir(parents=True, exist_ok=True)
     req = urllib.request.Request(url, headers={"User-Agent": "sevcap/1.0"})
@@ -280,16 +302,9 @@ class ResultWriter:
                 out.append(d)
         return out
 
-    def _harness_record(self, task_id: str, captions: dict[str, str]) -> dict:
-        return {
-            "task_id": task_id,
-            "captions": {
-                "formal": captions.get("formal", ""),
-                "sarcastic": captions.get("sarcastic", ""),
-                "humorous_tech": captions.get("humorous_tech", ""),
-                "humorous_non_tech": captions.get("humorous_non_tech", ""),
-            },
-        }
+    def _harness_record(self, task_id: str, captions: dict[str, str], styles: list[str] | None = None) -> dict:
+        normalized = normalize_captions(captions, styles)
+        return {"task_id": task_id, "captions": normalized}
 
     def _ordered_results(self) -> list[dict]:
         if self._task_order:
@@ -301,11 +316,26 @@ class ResultWriter:
             ordered_ids = sorted(self._combined)
         return [self._combined[task_id] for task_id in ordered_ids if task_id in self._combined]
 
-    def write(self, task_id: str, captions: dict[str, str], meta: dict | None = None) -> None:
-        record = self._harness_record(task_id, captions)
+    def write(
+        self,
+        task_id: str,
+        captions: dict[str, str],
+        meta: dict | None = None,
+        styles: list[str] | None = None,
+    ) -> None:
+        record = self._harness_record(task_id, captions, styles)
         self._combined[task_id] = record
         if task_id not in self._task_order:
             self._task_order.append(task_id)
+        self._flush(task_id, record, meta)
+
+    def finalize(self) -> None:
+        """Emit a valid (possibly empty) record for every expected task_id."""
+        for task_id in self._task_order:
+            if task_id not in self._combined:
+                self.write(task_id, empty_captions(), meta={"stage": "missing"})
+
+    def _flush(self, task_id: str, record: dict, meta: dict | None) -> None:
         harness_results = self._ordered_results()
         legacy = {
             "results": [

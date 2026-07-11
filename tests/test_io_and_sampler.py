@@ -47,6 +47,25 @@ def test_result_writer_per_clip_and_combined(tmp_path):
     assert json.loads((tmp_path / "clip1.json").read_text())["captions"]["formal"] == "better"
 
 
+def test_result_writer_finalize_missing_tasks(tmp_path):
+    w = ResultWriter(tmp_path, task_order=["v1", "v2", "v3"])
+    w.write("v1", {"formal": "f", "sarcastic": "s", "humorous_tech": "ht", "humorous_non_tech": "hnt"})
+    w.finalize()
+    harness = json.loads((tmp_path / "results.json").read_text())
+    assert [r["task_id"] for r in harness] == ["v1", "v2", "v3"]
+    assert harness[1]["captions"]["formal"] == ""
+    assert harness[2]["captions"]["sarcastic"] == ""
+
+
+def test_normalize_captions_fills_required_keys():
+    from sevcap.io_contract import normalize_captions
+
+    out = normalize_captions({"formal": "hello"})
+    assert set(out) == {"formal", "sarcastic", "humorous_tech", "humorous_non_tech"}
+    assert out["formal"] == "hello"
+    assert out["sarcastic"] == ""
+
+
 def test_load_tasks_and_harness_schema(tmp_path):
     tasks_path = tmp_path / "tasks.json"
     tasks_path.write_text(

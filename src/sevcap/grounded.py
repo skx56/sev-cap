@@ -53,9 +53,9 @@ def _clean_caption(raw: str) -> str:
 
 _DESCRIBE_PROMPT = """These {n} images are frames sampled across a {duration}-second video clip, in chronological order.
 {audio_block}{long_hint}
-Note the setting, the main subjects, the specific action or motion happening, and any readable on-screen text.
-Write 2-4 dense, factual sentences. Be specific; do not generalize{audio_clause}.
-Output ONLY the description text, no preamble or labels."""
+Describe exactly what is visible: the setting/location, main subjects (people, animals, objects), their colors and actions, and any readable on-screen text.
+Be concrete and specific — name what you see, not what you guess. No speculation beyond the frames{audio_clause}.
+Write 2-4 factual sentences. Output ONLY the description text, no preamble or labels."""
 
 _VERIFY_PROMPT = """These {n} images are frames from the same video clip.
 
@@ -155,9 +155,9 @@ async def write_styled_caption(
         f"Example captions in this style (tone only — do not copy content):\n{exemplars}\n\n"
         f"Factual description of the video clip:\n{description}\n\n"
         f"{tech_extra}"
-        f"Write ONE caption, 25 to 60 words. Write as if you personally watched the clip. "
-        f"Never mention computer vision, models, detection, frames, or uncertainty — "
-        f"just describe the scene confidently in the requested style. "
+        f"Write ONE caption in 1-2 sentences (about 15-45 words). "
+        f"Ground every claim in the description above. "
+        f"Write as if you personally watched the clip — never mention frames, models, or uncertainty. "
         f"Output ONLY the caption text."
         f"{variety}{fb}"
     )
@@ -182,19 +182,24 @@ async def write_styled_caption(
 async def caption_all_styles(
     llm: Gemma,
     description: str,
+    styles: list[str] | None = None,
 ) -> dict[str, str]:
-    """Write all four styles sequentially from one verified description."""
+    """Write requested styles sequentially from one verified description."""
+    from .io_contract import REQUIRED_STYLES, normalize_captions
     from .styles import STYLES
+
+    order = [k for k in (styles or list(STYLES)) if k in STYLES]
+    if not order:
+        order = list(STYLES.keys())
 
     captions: dict[str, str] = {}
     prior: list[str] = []
-    # First sentence of the verified description is a safe formal fallback.
-    fallback = description.split(".")[0].strip() + "." if description else "A short video clip."
-    for key in STYLE_ORDER:
+    fallback = description.split(".")[0].strip() + "." if description else ""
+    for key in order:
         try:
             cap = await write_styled_caption(llm, description, STYLES[key], prior)
         except Exception:  # noqa: BLE001
             cap = fallback if key == "formal" else (prior[-1] if prior else fallback)
         captions[key] = cap
         prior.append(cap)
-    return captions
+    return normalize_captions(captions, order)
