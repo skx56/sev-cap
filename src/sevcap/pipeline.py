@@ -19,7 +19,16 @@ from pathlib import Path
 from .audio import transcribe_with_meta
 from .config import ClipProfile, clip_profile, settings
 from .fireworks import Gemma
-from .grounded import caption_all_styles, describe_scene, verify_description, write_styled_caption
+from .grounded import (
+    _invents_foreign,
+    _style_ok,
+    _too_similar,
+    caption_all_styles,
+    describe_scene,
+    safe_style_caption,
+    verify_description,
+    write_styled_caption,
+)
 from .io_contract import (
     ResultWriter,
     discover_tasks,
@@ -39,8 +48,8 @@ log = logging.getLogger("sevcap.pipeline")
 
 POLISH_MIN_SCORE = 4
 POLISH_ENABLED = os.environ.get("SEVCAP_POLISH", "1") not in ("0", "false", "no")
-POLISH_MIN_REMAINING_S = 90.0
-POLISH_MAX_ROUNDS = int(os.environ.get("SEVCAP_POLISH_ROUNDS", "1"))
+POLISH_MIN_REMAINING_S = 60.0
+POLISH_MAX_ROUNDS = int(os.environ.get("SEVCAP_POLISH_ROUNDS", "2"))
 DOWNLOAD_WORKDIR = Path(os.environ.get("SEVCAP_DOWNLOAD_DIR", "/tmp/sevcap_tasks"))
 
 
@@ -167,17 +176,24 @@ async def _grounded_caption(
         captions = await caption_all_styles(llm, description, styles=job.styles)
 
         if POLISH_ENABLED and deadline.remaining() > POLISH_MIN_REMAINING_S:
-            for style_key in job.styles:
+            formal_anchor = captions.get("formal", "")
+            # Polish weaker styles first — accuracy failures concentrate there.
+            polish_order = [k for k in ("sarcastic", "humorous_tech", "humorous_non_tech", "formal")
+                            if k in job.styles]
+            for style_key in polish_order:
+                best = captions[style_key]
+                best_score = 0
                 for polish_round in range(max(0, POLISH_MAX_ROUNDS)):
                     if deadline.expired(reserve=POLISH_MIN_REMAINING_S):
                         break
                     try:
                         score = await score_caption_accuracy(
-                            llm, str(video), style_key, captions[style_key], frames=frames,
+                            llm, str(video), style_key, best, frames=frames,
                         )
                     except Exception as e:  # noqa: BLE001
                         log.warning("[%s] polish score failed for %s: %s", task_id, style_key, str(e)[:80])
                         break
+                    best_score = max(best_score, score)
                     if score >= POLISH_MIN_SCORE:
                         break
                     log.info("[%s] polishing %s round %d (score=%d)",
@@ -186,23 +202,62 @@ async def _grounded_caption(
                     try:
                         candidate = await write_styled_caption(
                             llm, description, STYLES[style_key], prior,
+                            formal_anchor=formal_anchor or None,
                             feedback=(
-                                f"The previous caption scored {score}/5 on factual accuracy. "
-                                "Stay closer to the description; do not invent events, brands, "
-                                "or city names missing from the description."
+                                f"Previous caption scored {score}/5 on factual accuracy. "
+                                "Remove invented events/objects. Use ONLY facts from the "
+                                "description and formal caption. Keep the style voice."
                             ),
                         )
                         new_score = await score_caption_accuracy(
                             llm, str(video), style_key, candidate, frames=frames,
                         )
                         if new_score >= score:
-                            captions[style_key] = candidate
+                            best = candidate
+                            best_score = new_score
                             score = new_score
                     except Exception as e:  # noqa: BLE001
                         log.warning("[%s] polish failed for %s: %s", task_id, style_key, str(e)[:100])
                         break
                     if score >= POLISH_MIN_SCORE:
                         break
+                if best_score < POLISH_MIN_SCORE and style_key != "formal" and formal_anchor:
+                    try:
+                        safe = await safe_style_caption(
+                            llm, description, STYLES[style_key], formal_anchor,
+                        )
+                        safe_score = await score_caption_accuracy(
+                            llm, str(video), style_key, safe, frames=frames,
+                        )
+                        # Prefer safe only if accuracy improves AND style didn't collapse.
+                        if (
+                            safe_score >= best_score
+                            and _style_ok(style_key, safe, formal_anchor, description)
+                        ):
+                            best = safe
+                            best_score = safe_score
+                            log.info("[%s] used safe fallback for %s (score=%d)",
+                                     task_id, style_key, safe_score)
+                    except Exception as e:  # noqa: BLE001
+                        log.warning("[%s] safe fallback failed for %s: %s",
+                                    task_id, style_key, str(e)[:100])
+                # Never keep a formal-clone for non-formal styles.
+                if (
+                    style_key != "formal"
+                    and formal_anchor
+                    and (
+                        _too_similar(best, formal_anchor)
+                        or _invents_foreign(best, description)
+                    )
+                ):
+                    try:
+                        best = await safe_style_caption(
+                            llm, description, STYLES[style_key], formal_anchor,
+                        )
+                        log.info("[%s] replaced bad-style caption for %s", task_id, style_key)
+                    except Exception:  # noqa: BLE001
+                        pass
+                captions[style_key] = best
 
         meta = {
             "stage": "sev-verified",

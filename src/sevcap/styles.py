@@ -60,7 +60,7 @@ STYLES: dict[str, StyleConfig] = {
             "Exclamation marks.",
             "Vague phrases like 'a scene' or 'various objects' with no specifics.",
         ],
-        temperature=0.35,
+        temperature=0.2,
         exemplars=[
             (_FACTS_DOG,
              "A brown dog pursues a yellow tennis ball across a grassy park before "
@@ -83,17 +83,17 @@ STYLES: dict[str, StyleConfig] = {
         ),
         rules=[
             "Stay accurate to what is on screen; sarcasm is tone, not invention.",
-            "Pick ONE target (the plan, the confidence, the setting) and needle it.",
+            "Needle ONE already-stated fact (the plan, confidence, or setting).",
             "Use ironic praise or deadpan understatement.",
             "Keep it dry: no LOL energy, no exclamation marks.",
-            "Prefer one punchy sentence.",
+            "Prefer one punchy sentence with no new nouns.",
         ],
         anti_patterns=[
+            "Inventing motion outcomes (standstill, crash, blur) not in the facts.",
             "Plain description with a snide adjective bolted on.",
             "Enthusiastic or silly tone (that is humor, not sarcasm).",
-            "Hallucinated plot points not in the description.",
         ],
-        temperature=0.85,
+        temperature=0.55,
         exemplars=[
             (_FACTS_DOG,
              "Truly elite fetch technique — right up to the part where the pond "
@@ -110,32 +110,29 @@ STYLES: dict[str, StyleConfig] = {
         label="Humorous (Tech)",
         description=(
             "Tech/programming humor that still names real video details. One clear "
-            "metaphor (deploy, bug, retry, stack, leaf nodes, agent, production) "
-            "mapped onto something visible."
+            "metaphor mapped onto something visible — never invent extra plot."
         ),
         rules=[
-            "Name at least one visible object, character, or action from the clip.",
-            "Anchor the joke in ONE recognizable tech concept.",
-            "The metaphor must map onto what actually happens in the clip.",
-            "Playful, not dry — this should read as a joke, not pure irony.",
-            "One sentence is usually enough.",
+            "Name at least one visible object or action from the facts.",
+            "Use exactly ONE tech metaphor (deploy, leaf nodes, retry, bug, agent...).",
+            "The metaphor must map onto what actually happens.",
+            "Keep it to one short sentence.",
+            "Do not invent secondary objects or failure modes.",
         ],
         anti_patterns=[
-            "Random tech words with no mapping to the scene.",
+            "Inventing objects not in the facts (lettuce, cloud migrations, segfaults).",
+            "Long multi-clause bug narratives.",
             "Deadpan mockery with no joke (that is sarcasm).",
-            "Generic office jokes unrelated to what is on screen.",
         ],
-        temperature=0.7,
+        temperature=0.55,
         exemplars=[
             (_FACTS_DOG,
-             "Fetch request launched on the tennis ball, hit an unhandled pond "
-             "exception, then ran shake() to flush the buffer."),
+             "Fetch request hit an unhandled pond exception, then shake() flushed "
+             "the buffer."),
             (_FACTS_PANCAKE,
-             "Pancake flip passed in staging, but production missed the pan target "
-             "and rolled back to the kitchen floor."),
+             "Pancake flip passed staging, then missed the pan target in production."),
             (_FACTS_CYCLIST,
-             "Lane-hopping tried to skip the traffic queue, then got rate-limited by "
-             "a red light."),
+             "Lane-hopping tried to skip the queue, then got rate-limited by a red light."),
         ],
     ),
     "humorous_non_tech": StyleConfig(
@@ -146,17 +143,18 @@ STYLES: dict[str, StyleConfig] = {
             "playful, still about the actual scene — sitcom-narrator energy."
         ),
         rules=[
-            "Absolutely no tech vocabulary or programming jargon.",
-            "Personify subjects or find the tiny human comedy in the moment.",
+            "Absolutely no tech vocabulary.",
+            "Personify subjects already in the facts, or understate the moment.",
             "Warm and playful, laughing with the subject.",
             "One clear comedic beat; land it and stop.",
+            "No invented interactions (staring contests, secret plots).",
         ],
         anti_patterns=[
-            "Any word a software engineer would claim (glitch, deploy, stack...).",
+            "Any software jargon (glitch, deploy, stack...).",
+            "Invented events not in the facts.",
             "Dry irony or mean-spirited mockery.",
-            "Generic jokes that ignore what is actually on screen.",
         ],
-        temperature=0.9,
+        temperature=0.6,
         exemplars=[
             (_FACTS_DOG,
              "He wanted the ball. The pond, apparently, wanted him."),

@@ -1,11 +1,8 @@
 """Grounded captioning: describe frames → self-verify → write styled captions.
 
-Matches the high-scoring Raccoon-Vision-Translator pattern (describe, verify,
-then text-only style writes from one shared grounding description) while
-keeping our style definitions and duration-scaled frame sampling.
-
-Tuned against AMD Track 2 sample references: specific visual details first,
-then short style-faithful captions with no hallucinations.
+Accuracy-first for Track 2: styled captions may ONLY rephrase facts from the
+verified description. Jokes change tone, never invent objects, motion, brands,
+or outcomes that are not in the description.
 """
 
 from __future__ import annotations
@@ -26,7 +23,6 @@ _META_RE = re.compile(
 
 
 def _safe_format(template: str, **kwargs: str | int) -> str:
-    """Format prompts without breaking on braces inside model/user text."""
     out = template
     for key, val in kwargs.items():
         out = out.replace("{" + key + "}", str(val))
@@ -60,11 +56,12 @@ Write a dense factual description of what is VISIBLY present. Include:
 - setting / location type
 - main subjects (people, animals, objects) with concrete attributes (color, size, clothing, breed if clear)
 - what is happening / motion across the frames
-- notable background details (buildings, weather, lighting) only if clearly visible
-Do NOT invent names of cities, brands, companies, or dialogue you cannot clearly read.
-If text is blurry or uncertain, omit it rather than guess.
-Be specific; prefer "golden ginkgo trees" over "trees", "orange tabby kitten" over "cat".
-Write 2-4 sentences. Output ONLY the description text, no preamble or labels."""
+- notable background details only if clearly visible
+STRICT:
+- Do NOT invent city names, brands, company logos, product models, or dialogue.
+- Prefer generic labels when uncertain ("desktop computer" not "iMac", "city intersection" not "Shibuya").
+- Prefer "golden ginkgo trees" / "orange tabby kitten" style specificity when clearly visible.
+Write 2-4 sentences. Output ONLY the description text."""
 
 _VERIFY_PROMPT = """These {n} images are frames from the same video clip.
 
@@ -72,11 +69,10 @@ Draft description:
 "{draft}"
 
 Check the draft against the actual frames.
-- Keep every detail that is clearly visible and specific.
-- Remove or correct anything invented, wrong, or too generic.
-- Drop uncertain brand names, city names, or signage you cannot clearly verify.
-- Do not add new speculative details.
-Output ONLY the final description — no preamble."""
+- Keep clearly visible, specific details.
+- Remove invented or uncertain brands, cities, product models, and plot.
+- Do not add speculative details.
+Output ONLY the final description."""
 
 
 async def describe_scene(
@@ -92,8 +88,7 @@ async def describe_scene(
     long_hint = ""
     if profile.long_form:
         long_hint = (
-            "\nThis is a longer clip — summarize the MAIN arc (who, what happens, "
-            "outcome) in 2-4 sentences. Omit minor background props.\n"
+            "\nLonger clip — summarize the MAIN arc in 2-4 sentences; omit minor props.\n"
         )
     images = [f.b64() for f in frames]
     prompt = _safe_format(
@@ -107,7 +102,7 @@ async def describe_scene(
     for attempt in range(3):
         try:
             raw = await llm.vision_chat(
-                prompt, images, temperature=0.2, max_tokens=450,
+                prompt, images, temperature=0.15, max_tokens=450,
                 tag="describe", reasoning="none", cache=attempt == 0,
             )
             return _clean_prose(raw)
@@ -126,7 +121,7 @@ async def verify_description(
     for attempt in range(3):
         try:
             raw = await llm.vision_chat(
-                prompt, images, temperature=0.05, max_tokens=400,
+                prompt, images, temperature=0.0, max_tokens=400,
                 tag="verify", reasoning="none", cache=attempt == 0,
             )
             return _clean_prose(raw)
@@ -136,12 +131,82 @@ async def verify_description(
     raise RuntimeError(f"verify_description failed: {last_err}")
 
 
-_LENGTH_HINT = {
-    "formal": "1-2 dense professional sentences (about 20-45 words).",
-    "sarcastic": "ONE dry sentence, punchy (about 12-28 words).",
-    "humorous_tech": "ONE tech-joke sentence that still names something visible (about 15-35 words).",
-    "humorous_non_tech": "ONE everyday-humor sentence grounded in the scene (about 12-30 words).",
+_STYLE_WRITE_HINTS = {
+    "formal": (
+        "Write a clear professional caption that restates the description. "
+        "1-2 dense sentences. No jokes, no opinions."
+    ),
+    "humorous_tech": (
+        "Write ONE short tech-humor sentence (15-32 words). "
+        "Joke about the PRIMARY visible action/subject (usually the first clause of the description). "
+        "Map that one thing to ONE tech metaphor (deploy, retry, bug, agent, staging). "
+        "Ignore background props unless they are the main subject. "
+        "Must read as a joke. Do not invent extra objects or failure plots. "
+        "Never say frame/frames."
+    ),
+    "humorous_non_tech": (
+        "Write ONE short everyday-humor sentence (12-30 words). "
+        "Personify or understate the PRIMARY subject/action from the description. "
+        "No tech jargon. Must be funny. No invented interactions. Never say frame/frames."
+    ),
+    "sarcastic": (
+        "Write ONE short dry sarcastic sentence (12-28 words). "
+        "Needle the PRIMARY action/subject with ironic praise or understatement. "
+        "MUST sound sarcastic when read alone — not a formal paraphrase. "
+        "Do not invent new events. Never say frame/frames."
+    ),
 }
+
+
+def _word_count(text: str) -> int:
+    return len([w for w in text.replace("—", " ").split() if w.strip()])
+
+
+def _too_similar(a: str, b: str) -> bool:
+    """True if caption collapsed into a near-copy of formal."""
+    if not a or not b:
+        return False
+    ta = {w.lower().strip(".,;:!?\"'") for w in a.split() if len(w) > 3}
+    tb = {w.lower().strip(".,;:!?\"'") for w in b.split() if len(w) > 3}
+    if not ta or not tb:
+        return False
+    overlap = len(ta & tb) / max(1, len(ta))
+    return overlap >= 0.72 or a.strip()[:80].lower() == b.strip()[:80].lower()
+
+
+_FOREIGN_BLOCK = {
+    "seoul", "tokyo", "shibuya", "nyc", "london", "paris",
+    "chrome", "firefox", "safari", "windows", "macos", "android", "iphone",
+    "ram", "cpu", "gpu", "5g", "wifi", "bluetooth", "usb",
+    "aws", "azure", "kubernetes", "docker", "stackoverflow",
+}
+_META_WORDS = ("frame", "frames", "keyframe", "keyframes", "timestamp")
+
+
+def _invents_foreign(caption: str, description: str) -> bool:
+    """Reject jokes that drag in cities/products absent from the description."""
+    desc = description.lower()
+    low = caption.lower()
+    for tok in _FOREIGN_BLOCK:
+        if tok in low and tok not in desc:
+            return True
+    for tok in _META_WORDS:
+        if re.search(rf"\b{tok}\b", low):
+            return True
+    return False
+
+
+def _style_ok(style_key: str, caption: str, formal: str | None, description: str = "") -> bool:
+    n = _word_count(caption)
+    if style_key == "formal":
+        return 12 <= n <= 70
+    if n > 36 or n < 8:
+        return False
+    if formal and _too_similar(caption, formal):
+        return False
+    if description and _invents_foreign(caption, description):
+        return False
+    return True
 
 
 async def write_styled_caption(
@@ -150,53 +215,113 @@ async def write_styled_caption(
     style: StyleConfig,
     prior_captions: list[str],
     feedback: str | None = None,
+    formal_anchor: str | None = None,
 ) -> str:
     variety = ""
     if prior_captions:
         variety = (
-            "\n\nCaptions already written in other styles (use a DIFFERENT sentence "
-            "structure and angle): " + " | ".join(prior_captions)
+            "\nOther styles already written (different voice, same facts): "
+            + " | ".join([c for c in prior_captions if _word_count(c) <= 40][:2])
         )
-    fb = f"\n\nRewrite feedback: {feedback}" if feedback else ""
-    tech_extra = ""
-    if style.key == "humorous_tech":
-        tech_extra = (
-            "\nUse exactly ONE tech metaphor mapped to ONE visible action or object. "
-            "Do not invent plot events.\n"
+    fb = f"\nRewrite feedback: {feedback}" if feedback else ""
+    anchor = ""
+    if formal_anchor and style.key != "formal":
+        anchor = (
+            f"\nFact checklist (do NOT copy this wording; only reuse its facts):\n"
+            f"{formal_anchor}\n"
+            f"Your caption must be SHORTER and clearly {style.label}, not formal.\n"
         )
     exemplars = "\n".join(f"- {cap}" for _, cap in style.exemplars[:2])
-    length = _LENGTH_HINT.get(style.key, "1-2 sentences.")
+    hint = _STYLE_WRITE_HINTS.get(style.key, "Write one caption.")
     prompt = (
         f"Style: {style.label}\n{style.description}\n\n"
         f"Rules:\n" + "\n".join(f"- {r}" for r in style.rules) + "\n\n"
         f"Never:\n" + "\n".join(f"- {a}" for a in style.anti_patterns) + "\n\n"
-        f"Example captions in this style (tone only — do not copy content):\n{exemplars}\n\n"
-        f"Factual description of the video clip:\n{description}\n\n"
-        f"{tech_extra}"
-        f"Write ONE caption. Length target: {length} "
-        f"Every concrete detail must come from the description — no invented city names, "
-        f"brands, company names, signage, or events. If the description does not name a "
-        f"brand or city, do not invent one. Write as if you personally watched the clip. "
-        f"Never mention computer vision, models, detection, frames, or uncertainty. "
-        f"Output ONLY the caption text."
+        f"Tone examples (do not copy content):\n{exemplars}\n\n"
+        f"Verified description (ONLY allowed facts):\n{description}\n"
+        f"{anchor}\n"
+        f"{hint}\n"
+        f"HARD CONSTRAINTS:\n"
+        f"- Every concrete noun/action must come from the description.\n"
+        f"- Do NOT name cities, brands, apps, or gadgets absent from the description "
+        f"(no Seoul/Tokyo/Chrome/RAM/5G unless those words appear above).\n"
+        f"- The joke's subject must be something visible in the description.\n"
+        f"- Change voice only; do not invent plot.\n"
+        f"- Never mention frames/models/uncertainty.\n"
+        f"- Output ONLY the caption text."
         f"{variety}{fb}"
     )
     last_err: Exception | None = None
-    for attempt in range(3):
+    last_cap = ""
+    for attempt in range(4):
         try:
             raw = await llm.chat(
                 [{"role": "user", "content": prompt}],
-                temperature=style.temperature,
-                max_tokens=160,
+                temperature=style.temperature if attempt == 0 else min(0.85, style.temperature + 0.12 * attempt),
+                max_tokens=120 if style.key != "formal" else 180,
                 tag=f"write-{style.key}",
                 reasoning="none",
                 cache=attempt == 0,
             )
-            return _clean_caption(raw)
+            cap = _clean_caption(raw)
+            last_cap = cap
+            if _style_ok(style.key, cap, formal_anchor if style.key != "formal" else None, description):
+                return cap
+            reason = "bad length/style"
+            if formal_anchor and _too_similar(cap, formal_anchor):
+                reason = "too similar to formal"
+            elif _invents_foreign(cap, description):
+                reason = "invented city/product not in description"
+            prompt = prompt + (
+                f"\n\nPrevious attempt rejected ({reason}): {cap}\n"
+                f"Write a NEW short {style.label} caption using ONLY description facts."
+            )
+            last_err = ValueError(f"style quality reject: {cap[:60]!r}")
         except Exception as e:  # noqa: BLE001
             last_err = e
-            await asyncio.sleep(2 * (attempt + 1))
+            await asyncio.sleep(1.2 * (attempt + 1))
+    if last_cap:
+        return last_cap
     raise RuntimeError(f"write_styled_caption({style.key}) failed: {last_err}")
+
+
+async def safe_style_caption(
+    llm: Gemma,
+    description: str,
+    style: StyleConfig,
+    formal_anchor: str,
+) -> str:
+    """Conservative short rewrite when polish still fails accuracy — keeps style."""
+    prompt = (
+        f"Write a SHORT {style.label} caption about this scene.\n\n"
+        f"Facts only:\n{description}\n\n"
+        f"Formal reference (facts only — DO NOT copy its sentence):\n{formal_anchor}\n\n"
+        f"Requirements:\n"
+        f"- One sentence, under 30 words.\n"
+        f"- Clearly {style.label} tone (not formal).\n"
+        f"- Subject must be a visible thing from the facts "
+        f"(trees/kitten/waves/knife/runner/etc — not Chrome/RAM/Seoul).\n"
+        f"- No new objects/events/brands/cities.\n"
+        f"- Output ONLY the caption."
+    )
+    last = ""
+    for attempt in range(3):
+        raw = await llm.chat(
+            [{"role": "user", "content": prompt}],
+            temperature=0.55 + 0.1 * attempt,
+            max_tokens=100,
+            tag=f"safe-{style.key}",
+            reasoning="none",
+            cache=False,
+        )
+        last = _clean_caption(raw)
+        if _style_ok(style.key, last, formal_anchor, description):
+            return last
+        prompt += (
+            "\nPrevious attempt failed (copied formal, too long, or invented "
+            "outside cities/products). Make it shorter and grounded."
+        )
+    return last
 
 
 async def caption_all_styles(
@@ -204,22 +329,45 @@ async def caption_all_styles(
     description: str,
     styles: list[str] | None = None,
 ) -> dict[str, str]:
-    """Write requested styles sequentially from one verified description."""
+    """Write formal first, then other styles locked to that fact checklist."""
     from .io_contract import normalize_captions
     from .styles import STYLES
 
     order = [k for k in (styles or list(STYLES)) if k in STYLES]
     if not order:
         order = list(STYLES.keys())
+    if "formal" in order:
+        order = ["formal"] + [k for k in order if k != "formal"]
 
     captions: dict[str, str] = {}
     prior: list[str] = []
     fallback = description.split(".")[0].strip() + "." if description else ""
+    formal_anchor = ""
     for key in order:
         try:
-            cap = await write_styled_caption(llm, description, STYLES[key], prior)
+            cap = await write_styled_caption(
+                llm, description, STYLES[key], prior,
+                formal_anchor=formal_anchor or None,
+            )
         except Exception:  # noqa: BLE001
-            cap = fallback if key == "formal" else (prior[-1] if prior else fallback)
+            if key == "formal":
+                cap = fallback
+            else:
+                try:
+                    cap = await safe_style_caption(
+                        llm, description, STYLES[key], formal_anchor or fallback,
+                    )
+                except Exception:  # noqa: BLE001
+                    cap = formal_anchor or fallback
+        if key != "formal" and formal_anchor and (
+            _too_similar(cap, formal_anchor) or _invents_foreign(cap, description)
+        ):
+            try:
+                cap = await safe_style_caption(llm, description, STYLES[key], formal_anchor)
+            except Exception:  # noqa: BLE001
+                pass
         captions[key] = cap
+        if key == "formal":
+            formal_anchor = cap
         prior.append(cap)
     return normalize_captions(captions, order)

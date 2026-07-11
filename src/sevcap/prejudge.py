@@ -20,8 +20,13 @@ Caption ({style}):
 
 Rate accuracy 1-5:
 5 = every concrete claim matches the video
-3 = mostly right with minor issues
-1 = describes things not in the video or invents dialogue
+4 = accurate with only tiny harmless wording stretch
+3 = mostly right but one questionable detail
+2 = invents an object, event, brand, or outcome not visible
+1 = mostly wrong / describes a different scene
+
+Punish invented plot (migrations, staring contests, segfaults, standstills)
+that is not visible in the frames.
 
 Think briefly if needed, then END with one line containing ONLY:
 {{"accuracy": <integer 1-5>}}"""
