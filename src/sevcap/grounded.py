@@ -3,6 +3,9 @@
 Matches the high-scoring Raccoon-Vision-Translator pattern (describe, verify,
 then text-only style writes from one shared grounding description) while
 keeping our style definitions and duration-scaled frame sampling.
+
+Tuned against AMD Track 2 sample references: specific visual details first,
+then short style-faithful captions with no hallucinations.
 """
 
 from __future__ import annotations
@@ -13,7 +16,7 @@ import re
 from .config import ClipProfile
 from .fireworks import Gemma
 from .sampler import Keyframe
-from .styles import STYLE_ORDER, StyleConfig
+from .styles import StyleConfig
 
 _META_RE = re.compile(
     r"^(I cannot|I can't|As an AI|Based on the (frames|keyframes|images)|"
@@ -53,17 +56,26 @@ def _clean_caption(raw: str) -> str:
 
 _DESCRIBE_PROMPT = """These {n} images are frames sampled across a {duration}-second video clip, in chronological order.
 {audio_block}{long_hint}
-Describe exactly what is visible: the setting/location, main subjects (people, animals, objects), their colors and actions, and any readable on-screen text.
-Be concrete and specific — name what you see, not what you guess. No speculation beyond the frames{audio_clause}.
-Write 2-4 factual sentences. Output ONLY the description text, no preamble or labels."""
+Write a dense factual description of what is VISIBLY present. Include:
+- setting / location type
+- main subjects (people, animals, objects) with concrete attributes (color, size, clothing, breed if clear)
+- what is happening / motion across the frames
+- notable background details (buildings, weather, lighting) only if clearly visible
+Do NOT invent names of cities, brands, companies, or dialogue you cannot clearly read.
+If text is blurry or uncertain, omit it rather than guess.
+Be specific; prefer "golden ginkgo trees" over "trees", "orange tabby kitten" over "cat".
+Write 2-4 sentences. Output ONLY the description text, no preamble or labels."""
 
 _VERIFY_PROMPT = """These {n} images are frames from the same video clip.
 
 Draft description:
 "{draft}"
 
-Check the draft against the actual frames. If accurate and specific, repeat it unchanged.
-If anything is wrong, invented, or too generic, correct it.
+Check the draft against the actual frames.
+- Keep every detail that is clearly visible and specific.
+- Remove or correct anything invented, wrong, or too generic.
+- Drop uncertain brand names, city names, or signage you cannot clearly verify.
+- Do not add new speculative details.
 Output ONLY the final description — no preamble."""
 
 
@@ -75,14 +87,12 @@ async def describe_scene(
     transcript_trusted: bool = False,
 ) -> str:
     audio_block = ""
-    audio_clause = ""
     if transcript and transcript_trusted:
         audio_block = f'\nTrusted dialogue transcript: "{transcript}"\n'
-        audio_clause = " or clearly spoken in the transcript"
     long_hint = ""
     if profile.long_form:
         long_hint = (
-            "\nThis is a longer clip — summarize the MAIN story arc (who, what happens, "
+            "\nThis is a longer clip — summarize the MAIN arc (who, what happens, "
             "outcome) in 2-4 sentences. Omit minor background props.\n"
         )
     images = [f.b64() for f in frames]
@@ -92,13 +102,12 @@ async def describe_scene(
         duration=int(profile.duration_s),
         audio_block=audio_block,
         long_hint=long_hint,
-        audio_clause=audio_clause,
     )
     last_err: Exception | None = None
     for attempt in range(3):
         try:
             raw = await llm.vision_chat(
-                prompt, images, temperature=0.3, max_tokens=400,
+                prompt, images, temperature=0.2, max_tokens=450,
                 tag="describe", reasoning="none", cache=attempt == 0,
             )
             return _clean_prose(raw)
@@ -117,7 +126,7 @@ async def verify_description(
     for attempt in range(3):
         try:
             raw = await llm.vision_chat(
-                prompt, images, temperature=0.1, max_tokens=350,
+                prompt, images, temperature=0.05, max_tokens=400,
                 tag="verify", reasoning="none", cache=attempt == 0,
             )
             return _clean_prose(raw)
@@ -125,6 +134,14 @@ async def verify_description(
             last_err = e
             await asyncio.sleep(2 * (attempt + 1))
     raise RuntimeError(f"verify_description failed: {last_err}")
+
+
+_LENGTH_HINT = {
+    "formal": "1-2 dense professional sentences (about 20-45 words).",
+    "sarcastic": "ONE dry sentence, punchy (about 12-28 words).",
+    "humorous_tech": "ONE tech-joke sentence that still names something visible (about 15-35 words).",
+    "humorous_non_tech": "ONE everyday-humor sentence grounded in the scene (about 12-30 words).",
+}
 
 
 async def write_styled_caption(
@@ -148,6 +165,7 @@ async def write_styled_caption(
             "Do not invent plot events.\n"
         )
     exemplars = "\n".join(f"- {cap}" for _, cap in style.exemplars[:2])
+    length = _LENGTH_HINT.get(style.key, "1-2 sentences.")
     prompt = (
         f"Style: {style.label}\n{style.description}\n\n"
         f"Rules:\n" + "\n".join(f"- {r}" for r in style.rules) + "\n\n"
@@ -155,9 +173,11 @@ async def write_styled_caption(
         f"Example captions in this style (tone only — do not copy content):\n{exemplars}\n\n"
         f"Factual description of the video clip:\n{description}\n\n"
         f"{tech_extra}"
-        f"Write ONE caption in 1-2 sentences (about 15-45 words). "
-        f"Ground every claim in the description above. "
-        f"Write as if you personally watched the clip — never mention frames, models, or uncertainty. "
+        f"Write ONE caption. Length target: {length} "
+        f"Every concrete detail must come from the description — no invented city names, "
+        f"brands, company names, signage, or events. If the description does not name a "
+        f"brand or city, do not invent one. Write as if you personally watched the clip. "
+        f"Never mention computer vision, models, detection, frames, or uncertainty. "
         f"Output ONLY the caption text."
         f"{variety}{fb}"
     )
@@ -167,7 +187,7 @@ async def write_styled_caption(
             raw = await llm.chat(
                 [{"role": "user", "content": prompt}],
                 temperature=style.temperature,
-                max_tokens=180,
+                max_tokens=160,
                 tag=f"write-{style.key}",
                 reasoning="none",
                 cache=attempt == 0,
@@ -185,7 +205,7 @@ async def caption_all_styles(
     styles: list[str] | None = None,
 ) -> dict[str, str]:
     """Write requested styles sequentially from one verified description."""
-    from .io_contract import REQUIRED_STYLES, normalize_captions
+    from .io_contract import normalize_captions
     from .styles import STYLES
 
     order = [k for k in (styles or list(STYLES)) if k in STYLES]

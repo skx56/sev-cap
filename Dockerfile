@@ -22,9 +22,15 @@ RUN python -c "from faster_whisper import WhisperModel; WhisperModel('base', dev
 # optional env override for the bonus chase, not the image default.
 ENV INPUT_DIR=/input \
     OUTPUT_DIR=/output \
+    OUTPUT_PATH=/output/results.json \
+    INPUT_PATH=/input/tasks.json \
     SEVCAP_CACHE=0 \
     SEVCAP_AUDIO=0 \
     SEVCAP_POLISH=1 \
+    SEVCAP_POLISH_ROUNDS=1 \
+    SEVCAP_DOWNLOAD_CONCURRENCY=4 \
+    SEVCAP_CLIP_CONCURRENCY=1 \
+    SEVCAP_TIME_BUDGET=900 \
     SEVCAP_MODEL="accounts/fireworks/models/kimi-k2p6" \
     SEVCAP_VISION_MODEL="accounts/fireworks/models/kimi-k2p6" \
     PYTHONUNBUFFERED=1

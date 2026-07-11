@@ -256,16 +256,49 @@ def normalize_captions(captions: dict[str, str], styles: list[str] | None = None
 
 
 def download_video(url: str, dest: Path) -> None:
+    """Download a remote clip, or copy a local path / file:// URL."""
     dest.parent.mkdir(parents=True, exist_ok=True)
-    req = urllib.request.Request(url, headers={"User-Agent": "sevcap/1.0"})
-    with urllib.request.urlopen(req, timeout=DOWNLOAD_TIMEOUT_S) as resp, open(dest, "wb") as out:
-        while True:
-            chunk = resp.read(1 << 20)
-            if not chunk:
-                break
-            out.write(chunk)
-    if dest.stat().st_size == 0:
-        raise RuntimeError(f"downloaded video is empty: {url}")
+    if url.startswith("file://"):
+        src = Path(urllib.request.url2pathname(url[7:]))
+        if not src.is_file():
+            raise FileNotFoundError(f"local video missing: {src}")
+        dest.write_bytes(src.read_bytes())
+        return
+    local = Path(url)
+    if local.is_file():
+        dest.write_bytes(local.read_bytes())
+        return
+
+    last_err: Exception | None = None
+    for attempt in range(1, 4):
+        try:
+            req = urllib.request.Request(
+                url,
+                headers={"User-Agent": "sevcap/1.0", "Accept": "*/*"},
+            )
+            with urllib.request.urlopen(req, timeout=DOWNLOAD_TIMEOUT_S) as resp, open(
+                dest, "wb"
+            ) as out:
+                while True:
+                    chunk = resp.read(1 << 20)
+                    if not chunk:
+                        break
+                    out.write(chunk)
+            if dest.stat().st_size == 0:
+                raise RuntimeError(f"downloaded video is empty: {url}")
+            return
+        except Exception as e:  # noqa: BLE001
+            last_err = e
+            log.warning(
+                "download attempt %d/3 failed for %s: %s",
+                attempt, url, str(e)[:120],
+            )
+            if dest.exists():
+                try:
+                    dest.unlink()
+                except OSError:
+                    pass
+    raise RuntimeError(f"download failed after 3 attempts: {last_err}")
 
 
 class ResultWriter:

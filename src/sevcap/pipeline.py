@@ -40,6 +40,7 @@ log = logging.getLogger("sevcap.pipeline")
 POLISH_MIN_SCORE = 4
 POLISH_ENABLED = os.environ.get("SEVCAP_POLISH", "1") not in ("0", "false", "no")
 POLISH_MIN_REMAINING_S = 90.0
+POLISH_MAX_ROUNDS = int(os.environ.get("SEVCAP_POLISH_ROUNDS", "1"))
 DOWNLOAD_WORKDIR = Path(os.environ.get("SEVCAP_DOWNLOAD_DIR", "/tmp/sevcap_tasks"))
 
 
@@ -167,7 +168,7 @@ async def _grounded_caption(
 
         if POLISH_ENABLED and deadline.remaining() > POLISH_MIN_REMAINING_S:
             for style_key in job.styles:
-                for polish_round in range(2):
+                for polish_round in range(max(0, POLISH_MAX_ROUNDS)):
                     if deadline.expired(reserve=POLISH_MIN_REMAINING_S):
                         break
                     try:
@@ -187,7 +188,8 @@ async def _grounded_caption(
                             llm, description, STYLES[style_key], prior,
                             feedback=(
                                 f"The previous caption scored {score}/5 on factual accuracy. "
-                                "Stay closer to the description; do not invent events or objects."
+                                "Stay closer to the description; do not invent events, brands, "
+                                "or city names missing from the description."
                             ),
                         )
                         new_score = await score_caption_accuracy(
@@ -333,9 +335,9 @@ async def run(input_dir: str | None = None, output_dir: str | None = None) -> di
     results_list = await asyncio.gather(*(one(job) for job in jobs))
     by_id = {r["task_id"]: r for r in results_list}
 
-    for round_no in range(2):
+    for round_no in range(1):  # one repair pass — keep under TIMEOUT with UHD clips
         failed = [j for j in jobs if by_id.get(j.task_id, {}).get("stage") != "sev-verified"]
-        if not failed or deadline.expired(reserve=60.0):
+        if not failed or deadline.expired(reserve=90.0):
             break
         log.warning("repair round %d: %s", round_no + 1, [j.task_id for j in failed])
         for r in await asyncio.gather(*(one(j) for j in failed)):

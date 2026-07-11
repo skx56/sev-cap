@@ -47,121 +47,125 @@ STYLES: dict[str, StyleConfig] = {
         description=(
             "Precise, neutral, professional register. Reads like a news agency "
             "or archival description: complete sentences, no contractions, no "
-            "opinion, no humor."
+            "opinion, no humor. Lead with specific visible details."
         ),
         rules=[
             "Complete grammatical sentences; no contractions or slang.",
-            "Objective and neutral: report only what happens.",
-            "Prefer precise verbs (e.g. 'proceeds', 'attempts') over casual ones.",
+            "Objective and neutral: report only what is visible.",
+            "Name concrete attributes (colors, materials, subject type) when known.",
             "1-2 sentences, information-dense.",
         ],
         anti_patterns=[
             "Any joke, irony, or editorializing.",
             "Exclamation marks.",
+            "Vague phrases like 'a scene' or 'various objects' with no specifics.",
         ],
-        temperature=0.4,
+        temperature=0.35,
         exemplars=[
             (_FACTS_DOG,
-             "A brown dog pursues a tennis ball across a public park before falling "
-             "into a shallow pond; it subsequently climbs out and shakes off the water."),
+             "A brown dog pursues a yellow tennis ball across a grassy park before "
+             "falling into a shallow pond, then climbs out and shakes off water."),
             (_FACTS_PANCAKE,
-             "An individual attempts to flip a pancake on a domestic stovetop; the "
-             "pancake misses the pan and lands on the kitchen floor."),
+             "A person flips a pancake on a home stovetop; the pancake misses the pan "
+             "and lands on the kitchen floor."),
             (_FACTS_CYCLIST,
-             "A helmeted cyclist manoeuvres between lanes of heavy urban traffic and "
-             "comes to a stop when the traffic signal turns red."),
+             "A helmeted cyclist weaves between car lanes on a busy city street and "
+             "stops when the traffic light turns red."),
         ],
     ),
     "sarcastic": StyleConfig(
         key="sarcastic",
         label="Sarcastic",
         description=(
-            "Dry, deadpan irony with a clear target. The words praise while the "
-            "meaning mocks, or the delivery is conspicuously underwhelmed by "
-            "obvious failure. Think eye-roll in text form."
+            "Dry, deadpan irony that is still factually about the video. Praise "
+            "that mocks, or understatement that makes the obvious look ridiculous. "
+            "Short and sharp — still accurate to the scene."
         ),
         rules=[
-            "Pick ONE target in the scene (the plan, the outcome, the confidence) and needle it.",
-            "Use ironic praise or deadpan understatement — say the opposite of what is meant.",
-            "Keep it dry: no LOL energy, no exclamation marks, no puns.",
-            "The sarcasm must be unmissable when read blind.",
+            "Stay accurate to what is on screen; sarcasm is tone, not invention.",
+            "Pick ONE target (the plan, the confidence, the setting) and needle it.",
+            "Use ironic praise or deadpan understatement.",
+            "Keep it dry: no LOL energy, no exclamation marks.",
+            "Prefer one punchy sentence.",
         ],
         anti_patterns=[
             "Plain description with a snide adjective bolted on.",
             "Enthusiastic or silly tone (that is humor, not sarcasm).",
+            "Hallucinated plot points not in the description.",
         ],
-        temperature=0.9,
+        temperature=0.85,
         exemplars=[
             (_FACTS_DOG,
-             "Truly elite ball-retrieval technique — right up to the part where the "
-             "pond was involved. Nailed it."),
+             "Truly elite fetch technique — right up to the part where the pond "
+             "joined the project."),
             (_FACTS_PANCAKE,
-             "A flawless pancake flip, assuming the goal all along was to feed the floor."),
+             "A flawless pancake flip, assuming the goal was always to feed the floor."),
             (_FACTS_CYCLIST,
-             "Bold of him to treat lane markings as decorative, only to be humbled by "
-             "a small red light like the rest of us."),
+             "Bold of him to treat lane markings as optional, until a tiny red light "
+             "reminded him otherwise."),
         ],
     ),
     "humorous_tech": StyleConfig(
         key="humorous_tech",
         label="Humorous (Tech)",
         description=(
-            "Comedy built on software/engineering culture: bugs, deploys, git, "
-            "CI, servers, versioning. The scene is described through a tech "
-            "metaphor a developer would grin at."
+            "Tech/programming humor that still names real video details. One clear "
+            "metaphor (deploy, bug, retry, stack, leaf nodes, agent, production) "
+            "mapped onto something visible."
         ),
         rules=[
-            "Anchor the joke in ONE recognizable tech concept (deploy, retry, exception, merge conflict...).",
+            "Name at least one visible object, character, or action from the clip.",
+            "Anchor the joke in ONE recognizable tech concept.",
             "The metaphor must map onto what actually happens in the clip.",
-            "Playful, not dry — this should read as a joke, not irony.",
-            "Jargon is the punchline, so use it accurately.",
+            "Playful, not dry — this should read as a joke, not pure irony.",
+            "One sentence is usually enough.",
         ],
         anti_patterns=[
             "Random tech words with no mapping to the scene.",
-            "Deadpan mockery (that is sarcasm, not tech humor).",
+            "Deadpan mockery with no joke (that is sarcasm).",
+            "Generic office jokes unrelated to what is on screen.",
         ],
-        temperature=0.95,
+        temperature=0.7,
         exemplars=[
             (_FACTS_DOG,
-             "Fetch request successful, but the dog hit an unhandled pond exception "
-             "mid-run. One full-body shake later, service was restored."),
+             "Fetch request launched on the tennis ball, hit an unhandled pond "
+             "exception, then ran shake() to flush the buffer."),
             (_FACTS_PANCAKE,
-             "The pancake flip worked perfectly in the pan environment but failed in "
-             "production. Rolling back to the floor was not the intended deploy."),
+             "Pancake flip passed in staging, but production missed the pan target "
+             "and rolled back to the kitchen floor."),
             (_FACTS_CYCLIST,
-             "Cyclist tries to bypass the traffic queue with some aggressive load "
-             "balancing, then gets rate-limited by a red light."),
+             "Lane-hopping tried to skip the traffic queue, then got rate-limited by "
+             "a red light."),
         ],
     ),
     "humorous_non_tech": StyleConfig(
         key="humorous_non_tech",
         label="Humorous (Non-Tech)",
         description=(
-            "Everyday observational or absurdist comedy with zero technical "
-            "vocabulary. The humor comes from timing, personification, or the "
-            "gap between ambition and reality — sitcom-narrator energy."
+            "Everyday observational comedy with zero technical vocabulary. Warm, "
+            "playful, still about the actual scene — sitcom-narrator energy."
         ),
         rules=[
-            "Absolutely no tech vocabulary or internet-culture jargon.",
-            "Personify objects or find the tiny human tragedy/comedy in the moment.",
+            "Absolutely no tech vocabulary or programming jargon.",
+            "Personify subjects or find the tiny human comedy in the moment.",
             "Warm and playful, laughing with the subject.",
             "One clear comedic beat; land it and stop.",
         ],
         anti_patterns=[
-            "Any word a software engineer would claim (glitch, update, loading...).",
+            "Any word a software engineer would claim (glitch, deploy, stack...).",
             "Dry irony or mean-spirited mockery.",
+            "Generic jokes that ignore what is actually on screen.",
         ],
-        temperature=0.95,
+        temperature=0.9,
         exemplars=[
             (_FACTS_DOG,
-             "He wanted the ball. The pond, apparently, wanted him. Everyone in the "
-             "park got something out of the deal."),
+             "He wanted the ball. The pond, apparently, wanted him."),
             (_FACTS_PANCAKE,
-             "The pancake took one look at the ceiling, reconsidered its options, and "
-             "decided the floor was more its scene."),
+             "The pancake reconsidered the ceiling and decided the floor was more "
+             "its scene."),
             (_FACTS_CYCLIST,
-             "City cycling: one part sport, two parts negotiation, and in the end a "
-             "tiny red light wins the argument anyway."),
+             "City cycling: one part sport, two parts negotiation, and a tiny red "
+             "light still wins."),
         ],
     ),
 }
