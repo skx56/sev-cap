@@ -62,6 +62,9 @@ Dockerfile      linux/amd64 scoring image
 
 Uses the same production pipeline as the Docker image (not a mock).
 
+**Streamlit Cloud:** deploy this repo, set main file to `demo/app.py`, add secret
+`FIREWORKS_API_KEY`, and ensure `packages.txt` installs `ffmpeg`.
+
 ## Config
 
 See [.env.example](.env.example). Image defaults: `SEVCAP_CANDIDATES=3`,

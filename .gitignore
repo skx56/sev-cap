@@ -14,3 +14,4 @@ build/
 .gradio/
 temp/
 *.mp4
+.streamlit/secrets.toml

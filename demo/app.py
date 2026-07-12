@@ -1,7 +1,11 @@
-"""Streamlit demo: upload an mp4, get 4 SEV-Cap captions from the real pipeline.
+"""SEV-Cap demo — elegant dark Streamlit UI over the production pipeline.
 
-Launch:
-  streamlit run demo/app.py --server.port 7860 --server.headless true
+Local:
+  streamlit run demo/app.py --server.port 7860
+
+Streamlit Cloud:
+  Main file path: demo/app.py
+  Secrets: FIREWORKS_API_KEY
 """
 from __future__ import annotations
 
@@ -20,29 +24,48 @@ import streamlit as st
 ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT / "src"))
 
-# Load .env if present (demo convenience; Docker/harness uses real env).
-_env = ROOT / ".env"
-if _env.exists():
-    for line in _env.read_text().splitlines():
-        line = line.strip()
-        if not line or line.startswith("#") or "=" not in line:
-            continue
-        k, v = line.split("=", 1)
-        os.environ.setdefault(k.strip(), v.strip().strip('"').strip("'"))
+
+def _load_secrets() -> None:
+    # Streamlit Cloud secrets
+    try:
+        if "FIREWORKS_API_KEY" in st.secrets:
+            os.environ.setdefault("FIREWORKS_API_KEY", str(st.secrets["FIREWORKS_API_KEY"]))
+        for k, v in st.secrets.items():
+            if isinstance(v, str) and k.startswith("SEVCAP_"):
+                os.environ.setdefault(k, v)
+    except Exception:  # noqa: BLE001
+        pass
+    # Local .env
+    env = ROOT / ".env"
+    if env.exists():
+        for line in env.read_text().splitlines():
+            line = line.strip()
+            if not line or line.startswith("#") or "=" not in line:
+                continue
+            k, v = line.split("=", 1)
+            os.environ.setdefault(k.strip(), v.strip().strip('"').strip("'"))
+
+
+_load_secrets()
 
 from sevcap.fireworks import Gemma  # noqa: E402
 from sevcap.io_contract import ResultWriter  # noqa: E402
-from sevcap.pipeline import Deadline, process_clip  # noqa: E402
+from sevcap.pipeline import ClipJob, Deadline, process_clip  # noqa: E402
+from sevcap.styles import STYLE_ORDER  # noqa: E402
 
-logging.basicConfig(
-    level=logging.INFO,
-    format="%(asctime)s %(name)s %(levelname)s %(message)s",
-)
+logging.basicConfig(level=logging.INFO, format="%(asctime)s %(name)s %(levelname)s %(message)s")
 log = logging.getLogger("sevcap.demo")
 
 DEMO_BUDGET_S = float(os.environ.get("SEVCAP_DEMO_BUDGET", "600"))
 OUT_DIR = Path(__file__).resolve().parent / "out" / "results"
 OUT_DIR.mkdir(parents=True, exist_ok=True)
+
+STYLES = [
+    ("formal", "Formal", "Clear. Precise. Archival."),
+    ("sarcastic", "Sarcastic", "Dry irony. Quiet bite."),
+    ("humorous_tech", "Humorous · Tech", "One metaphor. On-screen facts."),
+    ("humorous_non_tech", "Humorous · Non-Tech", "Warm. Everyday. No jargon."),
+]
 
 
 @st.cache_resource
@@ -52,14 +75,11 @@ def _get_llm() -> Gemma:
         asyncio.run(llm.resolve_text_model())
         asyncio.run(llm.check_vision())
     except Exception as e:  # noqa: BLE001
-        log.warning("model warm-up failed (will retry on request): %s", e)
+        log.warning("model warm-up failed: %s", e)
     return llm
 
 
 async def _caption(video_path: Path) -> tuple[dict[str, str], dict]:
-    from sevcap.pipeline import ClipJob
-    from sevcap.styles import STYLE_ORDER
-
     work = Path(tempfile.mkdtemp(prefix="sevcap_demo_"))
     try:
         dest = work / f"upload{video_path.suffix or '.mp4'}"
@@ -77,259 +97,230 @@ async def _caption(video_path: Path) -> tuple[dict[str, str], dict]:
         rec = json.loads(rec_path.read_text())
         caps = rec.get("captions") or {}
         meta = rec.get("verification") or {}
-        stage = meta.get("stage") or result.get("stage", "?")
-        info = {
+        return caps, {
             "elapsed": elapsed,
-            "stage": stage,
-            "budget": DEMO_BUDGET_S,
-            "description": (meta.get("grounding_description") or "")[:600],
+            "stage": meta.get("stage") or result.get("stage", "?"),
+            "description": (meta.get("grounding_description") or "")[:700],
             "keyframes": meta.get("keyframes"),
         }
-        return caps, info
     finally:
         shutil.rmtree(work, ignore_errors=True)
 
 
 CSS = """
 <style>
-@import url('https://fonts.googleapis.com/css2?family=Space+Grotesk:wght@400;500;600;700&family=Inter:wght@400;500;600&display=swap');
+@import url('https://fonts.googleapis.com/css2?family=Cormorant+Garamond:wght@500;600;700&family=Outfit:wght@300;400;500;600&display=swap');
 
-#MainMenu, header, footer {visibility: hidden;}
-
+html, body, [class*="css"] { font-family: 'Outfit', sans-serif; }
+#MainMenu, header, footer, [data-testid="stToolbar"], [data-testid="stDecoration"] { display:none !important; }
 .stApp {
-    background:
-        radial-gradient(1100px 600px at 12% -10%, rgba(139,92,246,0.20), transparent 55%),
-        radial-gradient(900px 600px at 88% 0%, rgba(236,72,153,0.16), transparent 55%),
-        radial-gradient(800px 700px at 50% 120%, rgba(34,211,238,0.12), transparent 55%),
-        #0b0b14;
-    background-attachment: fixed;
+  background:
+    radial-gradient(900px 520px at 12% -8%, rgba(201,162,93,0.10), transparent 55%),
+    radial-gradient(700px 480px at 92% 8%, rgba(94,129,140,0.10), transparent 50%),
+    linear-gradient(180deg, #09090b 0%, #0d0d10 48%, #080809 100%);
+  color: #ece7df;
 }
-.block-container { padding-top: 2.2rem; padding-bottom: 3rem; max-width: 1150px; }
+.block-container { max-width: 1080px; padding-top: 2.4rem; padding-bottom: 3.5rem; }
 
-html, body, [class*="css"] { font-family: 'Inter', sans-serif; }
+.brand {
+  font-family: 'Cormorant Garamond', serif;
+  font-size: clamp(3.4rem, 7vw, 5.4rem);
+  font-weight: 600;
+  letter-spacing: -0.02em;
+  line-height: 0.95;
+  color: #f4efe6;
+  margin: 0 0 0.55rem 0;
+}
+.tag {
+  display: inline-block;
+  font-size: 0.72rem;
+  letter-spacing: 0.18em;
+  text-transform: uppercase;
+  color: #c9a25d;
+  margin-bottom: 1.1rem;
+}
+.lede {
+  max-width: 38rem;
+  font-weight: 300;
+  font-size: 1.08rem;
+  line-height: 1.55;
+  color: #a7a29a;
+  margin-bottom: 1.8rem;
+}
+.panel {
+  border: 1px solid rgba(236,231,223,0.10);
+  background: rgba(255,255,255,0.025);
+  border-radius: 18px;
+  padding: 1.15rem 1.2rem;
+  backdrop-filter: blur(8px);
+}
+.panel-label {
+  font-size: 0.7rem;
+  letter-spacing: 0.16em;
+  text-transform: uppercase;
+  color: #8b8680;
+  margin-bottom: 0.75rem;
+}
+.style-row { display: grid; grid-template-columns: repeat(4, 1fr); gap: 0.7rem; margin: 1.2rem 0 1.6rem; }
+.style-chip {
+  border: 1px solid rgba(236,231,223,0.10);
+  border-radius: 14px;
+  padding: 0.85rem 0.9rem;
+  background: rgba(255,255,255,0.02);
+  min-height: 92px;
+}
+.style-chip .n {
+  font-family: 'Cormorant Garamond', serif;
+  font-size: 1.15rem;
+  color: #f1ebe3;
+  margin-bottom: 0.25rem;
+}
+.style-chip .d { font-size: 0.78rem; color: #8f8a83; line-height: 1.35; }
 
-.hero-title {
-    font-family: 'Space Grotesk', sans-serif;
-    font-weight: 700;
-    font-size: 3.4rem;
-    line-height: 1.05;
-    margin: 0;
-    background: linear-gradient(100deg, #a78bfa 0%, #ec4899 45%, #22d3ee 100%);
-    -webkit-background-clip: text;
-    -webkit-text-fill-color: transparent;
-    background-clip: text;
+.cap {
+  border: 1px solid rgba(236,231,223,0.10);
+  border-radius: 16px;
+  padding: 1.1rem 1.15rem 1.2rem;
+  background: linear-gradient(160deg, rgba(255,255,255,0.035), rgba(255,255,255,0.015));
+  min-height: 168px;
+  transition: border-color .2s ease, transform .2s ease;
 }
-.hero-sub {
-    font-family: 'Space Grotesk', sans-serif;
-    font-weight: 500;
-    font-size: 1.15rem;
-    color: #b7b7c9;
-    margin-top: .35rem;
+.cap:hover { border-color: rgba(201,162,93,0.35); transform: translateY(-1px); }
+.cap .k {
+  font-size: 0.68rem;
+  letter-spacing: 0.14em;
+  text-transform: uppercase;
+  color: #c9a25d;
+  margin-bottom: 0.55rem;
 }
-.hero-desc { color: #8b8ba3; font-size: .95rem; max-width: 720px; margin-top: .6rem; }
+.cap .t {
+  font-family: 'Cormorant Garamond', serif;
+  font-size: 1.28rem;
+  line-height: 1.35;
+  color: #f3eee6;
+}
 
-.pill-row { display: flex; gap: .5rem; flex-wrap: wrap; margin: 1rem 0 .4rem; }
-.pill {
-    font-family: 'Space Grotesk', sans-serif;
-    font-size: .78rem; font-weight: 600;
-    padding: .34rem .8rem; border-radius: 999px;
-    border: 1px solid rgba(255,255,255,0.10);
-    background: rgba(255,255,255,0.04);
-    color: #cfcfe2; backdrop-filter: blur(6px);
-}
-.pill.violet { border-color: rgba(139,92,246,0.5); color: #c4b5fd; }
-.pill.pink   { border-color: rgba(236,72,153,0.5); color: #f9a8d4; }
-.pill.cyan   { border-color: rgba(34,211,238,0.5); color: #67e8f9; }
-
-/* the 4 output styles, explained up front */
-.style-grid {
-    display: grid; grid-template-columns: repeat(2, 1fr);
-    gap: .7rem; margin: 1.15rem 0 .3rem;
-}
-.style-tile {
-    display: flex; gap: .7rem; align-items: flex-start;
-    padding: .8rem .95rem; border-radius: 14px;
-    background: rgba(255,255,255,0.035);
-    border: 1px solid rgba(255,255,255,0.08);
-    border-left: 3px solid var(--accent);
-    transition: transform .15s ease, background .15s ease;
-}
-.style-tile:hover { transform: translateY(-2px); background: rgba(255,255,255,0.06); }
-.st-name {
-    font-family: 'Space Grotesk', sans-serif; font-weight: 600;
-    font-size: .95rem; color: var(--accent);
-}
-.st-desc { color: #9a9ab0; font-size: .84rem; margin-top: .12rem; }
-@media (max-width: 720px) { .style-grid { grid-template-columns: 1fr; } }
-
-/* caption cards */
-.cap-card {
-    position: relative; border-radius: 18px; padding: 1.15rem 1.25rem 1.25rem;
-    background: linear-gradient(160deg, rgba(255,255,255,0.055), rgba(255,255,255,0.02));
-    border: 1px solid rgba(255,255,255,0.08);
-    box-shadow: 0 10px 30px rgba(0,0,0,0.35);
-    height: 100%; transition: transform .18s ease, box-shadow .18s ease, border-color .18s ease;
-    overflow: hidden;
-}
-.cap-card::before {
-    content: ""; position: absolute; inset: 0 0 auto 0; height: 3px;
-    background: var(--accent);
-}
-.cap-card:hover { transform: translateY(-4px); border-color: rgba(255,255,255,0.16);
-    box-shadow: 0 18px 44px rgba(0,0,0,0.5); }
-.cap-head { display:flex; align-items:center; gap:.55rem; margin-bottom:.55rem; }
-.cap-name {
-    font-family: 'Space Grotesk', sans-serif; font-weight: 600; font-size: .82rem;
-    letter-spacing: .08em; text-transform: uppercase; color: var(--accent);
-}
-.cap-body { color: #ececf5; font-size: 1.02rem; line-height: 1.5; }
-
-/* stat chips */
-.stat-wrap { display:flex; gap:.7rem; flex-wrap: wrap; margin: .2rem 0 1.2rem; }
+.stat-wrap { display:flex; gap:0.7rem; flex-wrap:wrap; margin: 0.4rem 0 1.1rem; }
 .stat {
-    border-radius: 14px; padding: .7rem 1.1rem; min-width: 120px;
-    background: rgba(255,255,255,0.04); border: 1px solid rgba(255,255,255,0.08);
+  border: 1px solid rgba(236,231,223,0.10);
+  border-radius: 12px;
+  padding: 0.65rem 0.9rem;
+  background: rgba(255,255,255,0.02);
+  min-width: 110px;
 }
-.stat .k { font-size: .72rem; color:#8b8ba3; text-transform: uppercase; letter-spacing:.06em; }
-.stat .v { font-family: 'Space Grotesk', sans-serif; font-weight: 700; font-size: 1.3rem; color:#fff; }
-
-/* fact chips */
-.fact { display:inline-block; margin:.2rem .3rem .2rem 0; padding:.32rem .7rem;
-    border-radius: 10px; font-size:.85rem; background: rgba(34,197,94,0.10);
-    border:1px solid rgba(34,197,94,0.30); color:#bbf7d0; }
-.fact .cat { color:#86efac; font-weight:600; font-size:.72rem; text-transform:uppercase; margin-right:.35rem; }
-.fact .sup { color:#6ee7b7; opacity:.8; font-size:.72rem; margin-left:.3rem; }
-.rej { display:inline-block; margin:.2rem .3rem .2rem 0; padding:.32rem .7rem;
-    border-radius: 10px; font-size:.85rem; background: rgba(244,63,94,0.08);
-    border:1px solid rgba(244,63,94,0.28); color:#fecdd3; text-decoration: line-through; opacity:.85; }
+.stat .k { font-size: 0.65rem; letter-spacing: 0.14em; text-transform: uppercase; color: #8b8680; }
+.stat .v { font-family: 'Cormorant Garamond', serif; font-size: 1.35rem; color: #f1ebe3; margin-top: 0.15rem; }
 
 .stButton > button {
-    font-family: 'Space Grotesk', sans-serif; font-weight: 600; font-size: 1.02rem;
-    border-radius: 14px; border: none; padding: .7rem 1rem;
-    background: linear-gradient(100deg, #8b5cf6, #ec4899);
-    color: white; transition: transform .15s ease, box-shadow .15s ease;
-    box-shadow: 0 8px 24px rgba(139,92,246,0.35);
+  width: 100%;
+  border: 1px solid rgba(201,162,93,0.45) !important;
+  background: linear-gradient(180deg, #d4b06e, #b8893f) !important;
+  color: #1a140c !important;
+  font-family: 'Outfit', sans-serif !important;
+  font-weight: 600 !important;
+  letter-spacing: 0.04em;
+  border-radius: 999px !important;
+  padding: 0.75rem 1rem !important;
+  box-shadow: 0 10px 28px rgba(184,137,63,0.18);
+  transition: transform .15s ease, box-shadow .15s ease;
 }
-.stButton > button:hover:not(:disabled) { transform: translateY(-2px);
-    box-shadow: 0 12px 30px rgba(236,72,153,0.45); }
-.stButton > button:disabled { opacity: .4; }
+.stButton > button:hover:not(:disabled) {
+  transform: translateY(-1px);
+  box-shadow: 0 14px 34px rgba(184,137,63,0.28);
+}
+.stButton > button:disabled { opacity: 0.35 !important; }
 
 [data-testid="stFileUploaderDropzone"] {
-    background: rgba(255,255,255,0.03); border: 1.5px dashed rgba(139,92,246,0.4);
-    border-radius: 16px;
+  background: rgba(255,255,255,0.02) !important;
+  border: 1px dashed rgba(236,231,223,0.22) !important;
+  border-radius: 16px !important;
 }
-hr { border-color: rgba(255,255,255,0.08); }
+[data-testid="stFileUploaderDropzone"] * { color: #a7a29a !important; }
+[data-testid="stStatusWidget"], .stAlert { border-radius: 14px; }
+hr { border: none; border-top: 1px solid rgba(236,231,223,0.08); margin: 1.4rem 0; }
+
+@media (max-width: 900px) {
+  .style-row { grid-template-columns: 1fr 1fr; }
+}
 </style>
 """
 
-STYLES = [
-    ("formal", "Formal", "#a78bfa"),
-    ("sarcastic", "Sarcastic", "#ec4899"),
-    ("humorous_tech", "Humorous · Tech", "#22d3ee"),
-    ("humorous_non_tech", "Humorous · Non-Tech", "#f59e0b"),
-]
-
-
-def _cap_card(key: str, name: str, accent: str, text: str) -> str:
-    body = (text or "—").replace("<", "&lt;").replace(">", "&gt;")
-    return f"""
-    <div class="cap-card" style="--accent:{accent}">
-      <div class="cap-head">
-        <span class="cap-name">{name}</span>
-      </div>
-      <div class="cap-body">{body}</div>
-    </div>
-    """
-
 
 def main() -> None:
-    st.set_page_config(page_title="SEV-Cap", layout="wide")
+    st.set_page_config(
+        page_title="SEV-Cap",
+        page_icon="◆",
+        layout="wide",
+        initial_sidebar_state="collapsed",
+    )
     st.markdown(CSS, unsafe_allow_html=True)
 
-    st.markdown('<div class="hero-title">SEV-Cap</div>', unsafe_allow_html=True)
-    st.markdown(
-        '<div class="hero-sub">Grounded Multi-Style Video Captions</div>',
-        unsafe_allow_html=True,
-    )
-    st.markdown(
-        '<div class="hero-desc">Upload a short clip and SEV-Cap writes '
-        "<b>four captions</b> — formal, sarcastic, humorous-tech, humorous-non-tech. "
-        "It describes the scene, verifies it against keyframes, drafts several "
-        "candidates per style, then picks the best on <b>accuracy</b> and "
-        "<b>tone</b> (the same axes Track 2 grades).</div>",
-        unsafe_allow_html=True,
-    )
-    st.markdown(
-        '<div class="style-grid">'
-        '<div class="style-tile" style="--accent:#a78bfa">'
-        '<div><div class="st-name">Formal</div>'
-        '<div class="st-desc">Clear, professional description of the scene.</div></div></div>'
-        '<div class="style-tile" style="--accent:#ec4899">'
-        '<div><div class="st-name">Sarcastic</div>'
-        '<div class="st-desc">Dry, witty take with a bit of attitude.</div></div></div>'
-        '<div class="style-tile" style="--accent:#22d3ee">'
-        '<div><div class="st-name">Humorous · Tech</div>'
-        '<div class="st-desc">Playful joke with a nerdy / tech twist.</div></div></div>'
-        '<div class="style-tile" style="--accent:#f59e0b">'
-        '<div><div class="st-name">Humorous · Non-Tech</div>'
-        '<div class="st-desc">Light, everyday humor anyone gets.</div></div></div>'
-        "</div>",
-        unsafe_allow_html=True,
-    )
-    st.markdown("<hr/>", unsafe_allow_html=True)
+    if not os.environ.get("FIREWORKS_API_KEY"):
+        st.error("FIREWORKS_API_KEY is missing. Add it in Streamlit secrets or a local `.env`.")
+        st.stop()
 
-    col_up, col_prev = st.columns([1.1, 1])
-    with col_up:
+    st.markdown('<div class="tag">Track 2 · Video Captioning</div>', unsafe_allow_html=True)
+    st.markdown('<div class="brand">SEV-Cap</div>', unsafe_allow_html=True)
+    st.markdown(
+        '<div class="lede">Four grounded captions from one clip — formal, sarcastic, '
+        "humorous-tech, humorous-non-tech — scored for accuracy and tone before they ship.</div>",
+        unsafe_allow_html=True,
+    )
+
+    chips = "".join(
+        f'<div class="style-chip"><div class="n">{name}</div><div class="d">{desc}</div></div>'
+        for _, name, desc in STYLES
+    )
+    st.markdown(f'<div class="style-row">{chips}</div>', unsafe_allow_html=True)
+
+    left, right = st.columns([1.15, 1], gap="large")
+    with left:
+        st.markdown('<div class="panel-label">Upload</div>', unsafe_allow_html=True)
         uploaded = st.file_uploader(
-            "Drop a video", type=["mp4", "mov", "mkv", "webm"], label_visibility="collapsed"
+            "video",
+            type=["mp4", "mov", "mkv", "webm"],
+            label_visibility="collapsed",
         )
-        run = st.button(
-            "Generate Captions",
-            type="primary",
-            disabled=uploaded is None,
-            use_container_width=True,
-        )
-    with col_prev:
+        run = st.button("Generate captions", type="primary", disabled=uploaded is None)
+    with right:
+        st.markdown('<div class="panel-label">Preview</div>', unsafe_allow_html=True)
         if uploaded is not None:
             st.video(uploaded)
         else:
             st.markdown(
-                '<div style="color:#6b6b83;padding:1.2rem 0;font-size:.9rem;">'
-                "Preview appears here once you pick a file.</div>",
+                '<div class="panel" style="min-height:180px;display:flex;align-items:center;'
+                'color:#8b8680;font-weight:300;">Drop a short clip to begin.</div>',
                 unsafe_allow_html=True,
             )
 
-    if run and uploaded is not None:
-        tmp = Path(tempfile.mkdtemp(prefix="sevcap_up_")) / uploaded.name
-        tmp.write_bytes(uploaded.getvalue())
+    if not (run and uploaded is not None):
+        return
 
-        with st.status("Running SEV-Cap pipeline…", expanded=True) as status:
+    tmp = Path(tempfile.mkdtemp(prefix="sevcap_up_")) / uploaded.name
+    tmp.write_bytes(uploaded.getvalue())
+    try:
+        with st.status("Composing captions…", expanded=True) as status:
             st.write("Sampling keyframes")
-            st.write("Describe → verify scene")
-            st.write("Multi-candidate styled captions + polish")
-            st.caption("Typically 1–3 minutes.")
+            st.write("Describe → verify")
+            st.write("Multi-candidate styles + vision prejudge")
             try:
                 caps, info = asyncio.run(_caption(tmp))
-                if info.get("error"):
-                    status.update(label="No output produced.", state="error")
-                    st.error(info["error"])
-                    return
-                status.update(label="Done!", state="complete", expanded=False)
             except Exception as e:  # noqa: BLE001
-                status.update(label="Pipeline error.", state="error", expanded=True)
-                st.error(f"Error: {e}")
+                status.update(label="Pipeline error", state="error", expanded=True)
+                st.error(str(e))
                 return
-            finally:
-                shutil.rmtree(tmp.parent, ignore_errors=True)
+            if info.get("error"):
+                status.update(label="No output", state="error")
+                st.error(info["error"])
+                return
+            status.update(label="Done", state="complete", expanded=False)
 
-        stage = info.get("stage", "?")
-        kf = info.get("keyframes") or "?"
         st.markdown(
             f"""
             <div class="stat-wrap">
               <div class="stat"><div class="k">Elapsed</div><div class="v">{info.get('elapsed',0):.0f}s</div></div>
-              <div class="stat"><div class="k">Stage</div><div class="v">{stage}</div></div>
-              <div class="stat"><div class="k">Keyframes</div><div class="v">{kf}</div></div>
+              <div class="stat"><div class="k">Stage</div><div class="v">{info.get('stage','?')}</div></div>
+              <div class="stat"><div class="k">Keyframes</div><div class="v">{info.get('keyframes') or '—'}</div></div>
             </div>
             """,
             unsafe_allow_html=True,
@@ -337,19 +328,20 @@ def main() -> None:
 
         r1 = st.columns(2)
         r2 = st.columns(2)
-        cells = [r1[0], r1[1], r2[0], r2[1]]
-        for cell, (key, name, accent) in zip(cells, STYLES):
+        for cell, (key, name, _) in zip([r1[0], r1[1], r2[0], r2[1]], STYLES):
+            text = (caps.get(key) or "—").replace("<", "&lt;").replace(">", "&gt;")
             with cell:
                 st.markdown(
-                    _cap_card(key, name, accent, caps.get(key)),
+                    f'<div class="cap"><div class="k">{name}</div><div class="t">{text}</div></div>',
                     unsafe_allow_html=True,
                 )
 
         desc = info.get("description") or ""
         if desc:
-            st.markdown("<div style='height:1rem'></div>", unsafe_allow_html=True)
-            with st.expander("Grounding description", expanded=False):
+            with st.expander("Grounding description"):
                 st.write(desc)
+    finally:
+        shutil.rmtree(tmp.parent, ignore_errors=True)
 
 
 if __name__ == "__main__":
