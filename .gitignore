@@ -5,9 +5,11 @@ __pycache__/
 .env
 .sevcap_cache/
 results/
+clips/
 eval/out/
 .pytest_cache/
 dist/
 build/
 .gradio/
 temp/
+*.mp4
