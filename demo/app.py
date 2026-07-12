@@ -2,10 +2,6 @@
 
 Local:
   streamlit run demo/app.py --server.port 7860
-
-Streamlit Cloud:
-  Main file path: demo/app.py
-  Secrets: FIREWORKS_API_KEY
 """
 from __future__ import annotations
 
@@ -14,6 +10,7 @@ import json
 import logging
 import os
 import shutil
+import subprocess
 import sys
 import tempfile
 import time
@@ -24,9 +21,11 @@ import streamlit as st
 ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT / "src"))
 
+MAX_UPLOAD_MB = int(os.environ.get("SEVCAP_DEMO_MAX_UPLOAD_MB", "1024"))
+COMPRESS_ABOVE_MB = int(os.environ.get("SEVCAP_DEMO_COMPRESS_ABOVE_MB", "80"))
+
 
 def _load_secrets() -> None:
-    # Streamlit Cloud secrets
     try:
         if "FIREWORKS_API_KEY" in st.secrets:
             os.environ.setdefault("FIREWORKS_API_KEY", str(st.secrets["FIREWORKS_API_KEY"]))
@@ -35,7 +34,6 @@ def _load_secrets() -> None:
                 os.environ.setdefault(k, v)
     except Exception:  # noqa: BLE001
         pass
-    # Local .env
     env = ROOT / ".env"
     if env.exists():
         for line in env.read_text().splitlines():
@@ -77,6 +75,37 @@ def _get_llm() -> Gemma:
     except Exception as e:  # noqa: BLE001
         log.warning("model warm-up failed: %s", e)
     return llm
+
+
+def _save_upload(uploaded, dest: Path) -> int:
+    """Stream upload to disk; return byte size."""
+    size = 0
+    with open(dest, "wb") as out:
+        uploaded.seek(0)
+        while True:
+            chunk = uploaded.read(1 << 20)
+            if not chunk:
+                break
+            out.write(chunk)
+            size += len(chunk)
+    return size
+
+
+def _compress_for_demo(src: Path, dest: Path) -> Path:
+    """Downscale large clips so demo stays responsive."""
+    cmd = [
+        "ffmpeg", "-hide_banner", "-loglevel", "error", "-y",
+        "-i", str(src),
+        "-vf", "scale='min(1280,iw)':-2",
+        "-c:v", "libx264", "-preset", "veryfast", "-crf", "28",
+        "-c:a", "aac", "-b:a", "96k",
+        "-movflags", "+faststart",
+        str(dest),
+    ]
+    res = subprocess.run(cmd, capture_output=True, text=True)
+    if res.returncode != 0 or not dest.exists() or dest.stat().st_size < 1000:
+        raise RuntimeError(f"ffmpeg compress failed: {(res.stderr or res.stdout)[:300]}")
+    return dest
 
 
 async def _caption(video_path: Path) -> tuple[dict[str, str], dict]:
@@ -121,96 +150,54 @@ html, body, [class*="css"] { font-family: 'Outfit', sans-serif; }
   color: #ece7df;
 }
 .block-container { max-width: 1080px; padding-top: 2.4rem; padding-bottom: 3.5rem; }
-
 .brand {
   font-family: 'Cormorant Garamond', serif;
   font-size: clamp(3.4rem, 7vw, 5.4rem);
-  font-weight: 600;
-  letter-spacing: -0.02em;
-  line-height: 0.95;
-  color: #f4efe6;
-  margin: 0 0 0.55rem 0;
+  font-weight: 600; letter-spacing: -0.02em; line-height: 0.95;
+  color: #f4efe6; margin: 0 0 0.55rem 0;
 }
 .tag {
-  display: inline-block;
-  font-size: 0.72rem;
-  letter-spacing: 0.18em;
-  text-transform: uppercase;
-  color: #c9a25d;
-  margin-bottom: 1.1rem;
+  display: inline-block; font-size: 0.72rem; letter-spacing: 0.18em;
+  text-transform: uppercase; color: #c9a25d; margin-bottom: 1.1rem;
 }
 .lede {
-  max-width: 38rem;
-  font-weight: 300;
-  font-size: 1.08rem;
-  line-height: 1.55;
-  color: #a7a29a;
-  margin-bottom: 1.8rem;
+  max-width: 40rem; font-weight: 300; font-size: 1.08rem; line-height: 1.55;
+  color: #a7a29a; margin-bottom: 1.2rem;
+}
+.hint {
+  font-size: 0.86rem; color: #8b8680; margin-bottom: 1.4rem;
 }
 .panel {
   border: 1px solid rgba(236,231,223,0.10);
   background: rgba(255,255,255,0.025);
-  border-radius: 18px;
-  padding: 1.15rem 1.2rem;
-  backdrop-filter: blur(8px);
+  border-radius: 18px; padding: 1.15rem 1.2rem;
 }
 .panel-label {
-  font-size: 0.7rem;
-  letter-spacing: 0.16em;
-  text-transform: uppercase;
-  color: #8b8680;
-  margin-bottom: 0.75rem;
+  font-size: 0.7rem; letter-spacing: 0.16em; text-transform: uppercase;
+  color: #8b8680; margin-bottom: 0.75rem;
 }
 .style-row { display: grid; grid-template-columns: repeat(4, 1fr); gap: 0.7rem; margin: 1.2rem 0 1.6rem; }
 .style-chip {
-  border: 1px solid rgba(236,231,223,0.10);
-  border-radius: 14px;
-  padding: 0.85rem 0.9rem;
-  background: rgba(255,255,255,0.02);
-  min-height: 92px;
+  border: 1px solid rgba(236,231,223,0.10); border-radius: 14px;
+  padding: 0.85rem 0.9rem; background: rgba(255,255,255,0.02); min-height: 92px;
 }
-.style-chip .n {
-  font-family: 'Cormorant Garamond', serif;
-  font-size: 1.15rem;
-  color: #f1ebe3;
-  margin-bottom: 0.25rem;
-}
+.style-chip .n { font-family: 'Cormorant Garamond', serif; font-size: 1.15rem; color: #f1ebe3; margin-bottom: 0.25rem; }
 .style-chip .d { font-size: 0.78rem; color: #8f8a83; line-height: 1.35; }
-
 .cap {
-  border: 1px solid rgba(236,231,223,0.10);
-  border-radius: 16px;
+  border: 1px solid rgba(236,231,223,0.10); border-radius: 16px;
   padding: 1.1rem 1.15rem 1.2rem;
   background: linear-gradient(160deg, rgba(255,255,255,0.035), rgba(255,255,255,0.015));
   min-height: 168px;
-  transition: border-color .2s ease, transform .2s ease;
 }
-.cap:hover { border-color: rgba(201,162,93,0.35); transform: translateY(-1px); }
-.cap .k {
-  font-size: 0.68rem;
-  letter-spacing: 0.14em;
-  text-transform: uppercase;
-  color: #c9a25d;
-  margin-bottom: 0.55rem;
-}
-.cap .t {
-  font-family: 'Cormorant Garamond', serif;
-  font-size: 1.28rem;
-  line-height: 1.35;
-  color: #f3eee6;
-}
-
+.cap .k { font-size: 0.68rem; letter-spacing: 0.14em; text-transform: uppercase; color: #c9a25d; margin-bottom: 0.55rem; }
+.cap .t { font-family: 'Cormorant Garamond', serif; font-size: 1.28rem; line-height: 1.35; color: #f3eee6; }
 .stat-wrap { display:flex; gap:0.7rem; flex-wrap:wrap; margin: 0.4rem 0 1.1rem; }
 .stat {
-  border: 1px solid rgba(236,231,223,0.10);
-  border-radius: 12px;
-  padding: 0.65rem 0.9rem;
-  background: rgba(255,255,255,0.02);
-  min-width: 110px;
+  border: 1px solid rgba(236,231,223,0.10); border-radius: 12px;
+  padding: 0.65rem 0.9rem; background: rgba(255,255,255,0.02); min-width: 110px;
 }
 .stat .k { font-size: 0.65rem; letter-spacing: 0.14em; text-transform: uppercase; color: #8b8680; }
 .stat .v { font-family: 'Cormorant Garamond', serif; font-size: 1.35rem; color: #f1ebe3; margin-top: 0.15rem; }
-
 .stButton > button {
   width: 100%;
   border: 1px solid rgba(201,162,93,0.45) !important;
@@ -221,27 +208,15 @@ html, body, [class*="css"] { font-family: 'Outfit', sans-serif; }
   letter-spacing: 0.04em;
   border-radius: 999px !important;
   padding: 0.75rem 1rem !important;
-  box-shadow: 0 10px 28px rgba(184,137,63,0.18);
-  transition: transform .15s ease, box-shadow .15s ease;
-}
-.stButton > button:hover:not(:disabled) {
-  transform: translateY(-1px);
-  box-shadow: 0 14px 34px rgba(184,137,63,0.28);
 }
 .stButton > button:disabled { opacity: 0.35 !important; }
-
 [data-testid="stFileUploaderDropzone"] {
   background: rgba(255,255,255,0.02) !important;
   border: 1px dashed rgba(236,231,223,0.22) !important;
   border-radius: 16px !important;
 }
 [data-testid="stFileUploaderDropzone"] * { color: #a7a29a !important; }
-[data-testid="stStatusWidget"], .stAlert { border-radius: 14px; }
-hr { border: none; border-top: 1px solid rgba(236,231,223,0.08); margin: 1.4rem 0; }
-
-@media (max-width: 900px) {
-  .style-row { grid-template-columns: 1fr 1fr; }
-}
+@media (max-width: 900px) { .style-row { grid-template-columns: 1fr 1fr; } }
 </style>
 """
 
@@ -266,6 +241,11 @@ def main() -> None:
         "humorous-tech, humorous-non-tech — scored for accuracy and tone before they ship.</div>",
         unsafe_allow_html=True,
     )
+    st.markdown(
+        f'<div class="hint">Tip: clips under ~{COMPRESS_ABOVE_MB}MB are fastest. '
+        f"Larger files (up to {MAX_UPLOAD_MB}MB) are accepted and auto-compressed for demo.</div>",
+        unsafe_allow_html=True,
+    )
 
     chips = "".join(
         f'<div class="style-chip"><div class="n">{name}</div><div class="d">{desc}</div></div>'
@@ -280,12 +260,41 @@ def main() -> None:
             "video",
             type=["mp4", "mov", "mkv", "webm"],
             label_visibility="collapsed",
+            help=f"Max {MAX_UPLOAD_MB}MB. Large files are compressed automatically.",
         )
-        run = st.button("Generate captions", type="primary", disabled=uploaded is None)
+        ready = False
+        size_mb = 0.0
+        if uploaded is not None:
+            try:
+                # Prefer reported size; fall back to buffer length.
+                raw_size = getattr(uploaded, "size", None)
+                if raw_size is None:
+                    pos = uploaded.tell()
+                    uploaded.seek(0, os.SEEK_END)
+                    raw_size = uploaded.tell()
+                    uploaded.seek(pos)
+                size_mb = float(raw_size) / (1024 * 1024)
+                if size_mb <= 0:
+                    st.error("Upload failed (empty file). Remove it and try again.")
+                elif size_mb > MAX_UPLOAD_MB:
+                    st.error(
+                        f"File is {size_mb:.0f}MB — over the {MAX_UPLOAD_MB}MB limit. "
+                        "Compress/export a shorter 720p clip and re-upload."
+                    )
+                else:
+                    ready = True
+                    st.caption(f"Ready · {uploaded.name} · {size_mb:.1f}MB")
+            except Exception as e:  # noqa: BLE001
+                st.error(f"Upload unreadable: {e}. Remove the red file chip and upload again.")
+        run = st.button("Generate captions", type="primary", disabled=not ready, use_container_width=True)
+
     with right:
         st.markdown('<div class="panel-label">Preview</div>', unsafe_allow_html=True)
-        if uploaded is not None:
-            st.video(uploaded)
+        if ready and uploaded is not None:
+            try:
+                st.video(uploaded)
+            except Exception:  # noqa: BLE001
+                st.info("Preview unavailable for this file — generation can still run.")
         else:
             st.markdown(
                 '<div class="panel" style="min-height:180px;display:flex;align-items:center;'
@@ -293,18 +302,46 @@ def main() -> None:
                 unsafe_allow_html=True,
             )
 
-    if not (run and uploaded is not None):
+    if not run:
+        # Show prior results if any
+        if st.session_state.get("last_caps"):
+            _render_results(st.session_state["last_caps"], st.session_state.get("last_info") or {})
+        return
+    if not ready or uploaded is None:
+        st.warning("Upload a valid video first (red chip = failed upload).")
         return
 
-    tmp = Path(tempfile.mkdtemp(prefix="sevcap_up_")) / uploaded.name
-    tmp.write_bytes(uploaded.getvalue())
+    work = Path(tempfile.mkdtemp(prefix="sevcap_up_"))
     try:
-        with st.status("Composing captions…", expanded=True) as status:
-            st.write("Sampling keyframes")
-            st.write("Describe → verify")
-            st.write("Multi-candidate styles + vision prejudge")
+        src = work / Path(uploaded.name).name
+        with st.status("Preparing video…", expanded=True) as status:
+            st.write("Saving upload to disk")
             try:
-                caps, info = asyncio.run(_caption(tmp))
+                nbytes = _save_upload(uploaded, src)
+            except Exception as e:  # noqa: BLE001
+                status.update(label="Save failed", state="error", expanded=True)
+                st.error(f"Could not save upload: {e}")
+                return
+            st.write(f"Saved {nbytes / (1024 * 1024):.1f}MB")
+
+            video_for_pipeline = src
+            if nbytes >= COMPRESS_ABOVE_MB * 1024 * 1024:
+                st.write(f"Compressing for demo (source ≥ {COMPRESS_ABOVE_MB}MB)…")
+                compact = work / "demo_input.mp4"
+                try:
+                    _compress_for_demo(src, compact)
+                    video_for_pipeline = compact
+                    st.write(
+                        f"Compressed to {compact.stat().st_size / (1024 * 1024):.1f}MB"
+                    )
+                except Exception as e:  # noqa: BLE001
+                    status.update(label="Compress failed", state="error", expanded=True)
+                    st.error(str(e))
+                    return
+
+            st.write("Sampling keyframes → describe/verify → multi-candidate captions")
+            try:
+                caps, info = asyncio.run(_caption(video_for_pipeline))
             except Exception as e:  # noqa: BLE001
                 status.update(label="Pipeline error", state="error", expanded=True)
                 st.error(str(e))
@@ -315,33 +352,37 @@ def main() -> None:
                 return
             status.update(label="Done", state="complete", expanded=False)
 
-        st.markdown(
-            f"""
-            <div class="stat-wrap">
-              <div class="stat"><div class="k">Elapsed</div><div class="v">{info.get('elapsed',0):.0f}s</div></div>
-              <div class="stat"><div class="k">Stage</div><div class="v">{info.get('stage','?')}</div></div>
-              <div class="stat"><div class="k">Keyframes</div><div class="v">{info.get('keyframes') or '—'}</div></div>
-            </div>
-            """,
-            unsafe_allow_html=True,
-        )
-
-        r1 = st.columns(2)
-        r2 = st.columns(2)
-        for cell, (key, name, _) in zip([r1[0], r1[1], r2[0], r2[1]], STYLES):
-            text = (caps.get(key) or "—").replace("<", "&lt;").replace(">", "&gt;")
-            with cell:
-                st.markdown(
-                    f'<div class="cap"><div class="k">{name}</div><div class="t">{text}</div></div>',
-                    unsafe_allow_html=True,
-                )
-
-        desc = info.get("description") or ""
-        if desc:
-            with st.expander("Grounding description"):
-                st.write(desc)
+        st.session_state["last_caps"] = caps
+        st.session_state["last_info"] = info
+        _render_results(caps, info)
     finally:
-        shutil.rmtree(tmp.parent, ignore_errors=True)
+        shutil.rmtree(work, ignore_errors=True)
+
+
+def _render_results(caps: dict[str, str], info: dict) -> None:
+    st.markdown(
+        f"""
+        <div class="stat-wrap">
+          <div class="stat"><div class="k">Elapsed</div><div class="v">{info.get('elapsed',0):.0f}s</div></div>
+          <div class="stat"><div class="k">Stage</div><div class="v">{info.get('stage','?')}</div></div>
+          <div class="stat"><div class="k">Keyframes</div><div class="v">{info.get('keyframes') or '—'}</div></div>
+        </div>
+        """,
+        unsafe_allow_html=True,
+    )
+    r1 = st.columns(2)
+    r2 = st.columns(2)
+    for cell, (key, name, _) in zip([r1[0], r1[1], r2[0], r2[1]], STYLES):
+        text = (caps.get(key) or "—").replace("<", "&lt;").replace(">", "&gt;")
+        with cell:
+            st.markdown(
+                f'<div class="cap"><div class="k">{name}</div><div class="t">{text}</div></div>',
+                unsafe_allow_html=True,
+            )
+    desc = info.get("description") or ""
+    if desc:
+        with st.expander("Grounding description"):
+            st.write(desc)
 
 
 if __name__ == "__main__":
