@@ -1,4 +1,4 @@
-"""sevcap CLI: run pipeline, smoke-check vision, lineup-test exemplars."""
+"""sevcap CLI: run pipeline and smoke-check vision."""
 
 from __future__ import annotations
 
@@ -7,9 +7,8 @@ import json
 
 import typer
 from rich.console import Console
-from rich.table import Table
 
-app = typer.Typer(help="SEV-Cap: Semantic-Entropy Verified video captioning.")
+app = typer.Typer(help="SEV-Cap: grounded multi-style video captioning.")
 console = Console()
 
 
@@ -37,77 +36,6 @@ def check():
 
     model = asyncio.run(_check())
     console.print(f"[green]Vision OK[/green] via model: [bold]{model}[/bold]")
-
-
-@app.command("lineup-test")
-def lineup_test():
-    """Blind-lineup the hand-written exemplars themselves (style QA)."""
-    from .fireworks import Gemma
-    from .gates import blind_lineup
-    from .styles import STYLES
-
-    async def _test():
-        llm = Gemma()
-        await llm.resolve_text_model()
-        n_scenarios = len(next(iter(STYLES.values())).exemplars)
-        table = Table(title="Exemplar blind-lineup results")
-        table.add_column("Scenario")
-        table.add_column("Style")
-        table.add_column("Judged as")
-        table.add_column("Conf")
-        table.add_column("Pass")
-        all_pass = True
-        for i in range(n_scenarios):
-            captions = {k: s.exemplars[i][1] for k, s in STYLES.items()}
-            results = await blind_lineup(llm, captions, rng_seed=i)
-            for k, r in results.items():
-                ok = "[green]yes[/green]" if r.passed else "[red]NO[/red]"
-                all_pass = all_pass and r.passed
-                table.add_row(str(i + 1), k, r.judged_as, str(r.confidence), ok)
-        console.print(table)
-        if not all_pass:
-            raise typer.Exit(1)
-
-    asyncio.run(_test())
-
-
-@app.command()
-def facts(
-    video: str = typer.Argument(..., help="Path to one video clip"),
-    k: int = typer.Option(None, "--k", help="Number of extraction samples"),
-):
-    """Debug: run Stage 1 + semantic-entropy verification on one clip."""
-    from .audio import transcribe_with_meta
-    from .speech_filter import filter_speech_facts
-    from .config import clip_profile, settings
-    from .entropy import verify_facts
-    from .extractor import extract_facts
-    from .fireworks import Gemma
-    from .sampler import probe_duration, sample_keyframes
-
-    async def _facts():
-        llm = Gemma()
-        await llm.resolve_text_model()
-        profile = clip_profile(probe_duration(video))
-        frames = sample_keyframes(video, profile.n_frames)
-        console.print(
-            f"Sampled {len(frames)} keyframes (duration={profile.duration_s:.0f}s)"
-        )
-        tr = transcribe_with_meta(video)
-        if tr.text:
-            console.print(f"Audio transcript (trusted={tr.trusted}): {tr.text!r}")
-        extractions = await extract_facts(
-            llm, frames, k=k or settings.k_samples,
-            transcript=tr.text, transcript_trusted=tr.trusted,
-            duration_s=profile.duration_s,
-        )
-        sheet = filter_speech_facts(
-            await verify_facts(llm, extractions, settings.min_support),
-            tr.trusted,
-        )
-        console.print_json(json.dumps(sheet.report()))
-
-    asyncio.run(_facts())
 
 
 def main() -> None:

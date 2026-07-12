@@ -56,40 +56,20 @@ def _get_llm() -> Gemma:
     return llm
 
 
-def _verified_facts(meta: dict) -> list[dict]:
-    fv = (meta or {}).get("fact_verification") or {}
-    verified = fv.get("verified_facts") or []
-    out = []
-    for f in verified[:24]:
-        out.append(
-            {
-                "category": f.get("category", "?"),
-                "text": f.get("text", ""),
-                "support": f.get("support", "?"),
-            }
-        )
-    return out
-
-
-def _rejected_facts(meta: dict) -> list[str]:
-    fv = (meta or {}).get("fact_verification") or {}
-    rej = fv.get("rejected_high_entropy_facts") or fv.get("rejected_facts") or []
-    out = []
-    for f in rej[:24]:
-        out.append(f.get("text", "") if isinstance(f, dict) else str(f))
-    return [x for x in out if x]
-
-
 async def _caption(video_path: Path) -> tuple[dict[str, str], dict]:
+    from sevcap.pipeline import ClipJob
+    from sevcap.styles import STYLE_ORDER
+
     work = Path(tempfile.mkdtemp(prefix="sevcap_demo_"))
     try:
         dest = work / f"upload{video_path.suffix or '.mp4'}"
         shutil.copy2(video_path, dest)
         llm = _get_llm()
-        writer = ResultWriter(OUT_DIR)
+        writer = ResultWriter(OUT_DIR, task_order=[dest.stem])
         deadline = Deadline(DEMO_BUDGET_S)
+        job = ClipJob(task_id=dest.stem, styles=list(STYLE_ORDER), video=dest)
         t0 = time.monotonic()
-        result = await process_clip(llm, dest, writer, deadline)
+        result = await process_clip(llm, job, writer, deadline)
         elapsed = time.monotonic() - t0
         rec_path = OUT_DIR / f"{dest.stem}.json"
         if not rec_path.exists():
@@ -102,8 +82,8 @@ async def _caption(video_path: Path) -> tuple[dict[str, str], dict]:
             "elapsed": elapsed,
             "stage": stage,
             "budget": DEMO_BUDGET_S,
-            "verified": _verified_facts(meta),
-            "rejected": _rejected_facts(meta),
+            "description": (meta.get("grounding_description") or "")[:600],
+            "keyframes": meta.get("keyframes"),
         }
         return caps, info
     finally:
@@ -323,10 +303,9 @@ def main() -> None:
         tmp.write_bytes(uploaded.getvalue())
 
         with st.status("Running SEV-Cap pipeline…", expanded=True) as status:
-            st.write("Initializing models & extracting keyframes")
-            st.write("Transcribing audio track")
-            st.write("K-sample extraction → semantic-entropy verification")
-            st.write("Generating & refining four caption styles")
+            st.write("Sampling keyframes")
+            st.write("Describe → verify scene")
+            st.write("Multi-candidate styled captions + polish")
             st.caption("Typically 1–3 minutes.")
             try:
                 caps, info = asyncio.run(_caption(tmp))
@@ -343,15 +322,13 @@ def main() -> None:
                 shutil.rmtree(tmp.parent, ignore_errors=True)
 
         stage = info.get("stage", "?")
-        verified = info.get("verified", [])
-        rejected = info.get("rejected", [])
+        kf = info.get("keyframes") or "?"
         st.markdown(
             f"""
             <div class="stat-wrap">
               <div class="stat"><div class="k">Elapsed</div><div class="v">{info.get('elapsed',0):.0f}s</div></div>
               <div class="stat"><div class="k">Stage</div><div class="v">{stage}</div></div>
-              <div class="stat"><div class="k">Verified facts</div><div class="v">{len(verified)}</div></div>
-              <div class="stat"><div class="k">Rejected</div><div class="v">{len(rejected)}</div></div>
+              <div class="stat"><div class="k">Keyframes</div><div class="v">{kf}</div></div>
             </div>
             """,
             unsafe_allow_html=True,
@@ -367,22 +344,11 @@ def main() -> None:
                     unsafe_allow_html=True,
                 )
 
-        st.markdown("<div style='height:1rem'></div>", unsafe_allow_html=True)
-        with st.expander("Verification report", expanded=bool(verified)):
-            if verified:
-                st.markdown("**Verified facts** *(survived semantic-entropy voting)*")
-                chips = "".join(
-                    f'<span class="fact"><span class="cat">{f["category"]}</span>'
-                    f'{f["text"]}<span class="sup">×{f["support"]}</span></span>'
-                    for f in verified
-                )
-                st.markdown(chips, unsafe_allow_html=True)
-            else:
-                st.info("No verified facts (draft stage or empty fact sheet).")
-            if rejected:
-                st.markdown("**Rejected** *(high-entropy / low-support)*")
-                rchips = "".join(f'<span class="rej">{r}</span>' for r in rejected)
-                st.markdown(rchips, unsafe_allow_html=True)
+        desc = info.get("description") or ""
+        if desc:
+            st.markdown("<div style='height:1rem'></div>", unsafe_allow_html=True)
+            with st.expander("Grounding description", expanded=False):
+                st.write(desc)
 
 
 if __name__ == "__main__":

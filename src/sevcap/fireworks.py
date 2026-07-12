@@ -252,6 +252,7 @@ class Gemma:
                 last_err = e
                 self.usage.errors += 1
                 msg = str(e).lower()
+                status = getattr(e, "status_code", None)
                 # Permanent auth failure — retrying burns the harness time budget.
                 if status == 401 and any(s in msg for s in ("invalid", "unauthorized", "api key")):
                     if "invalid" in msg or "api key you provided" in msg:
@@ -273,7 +274,6 @@ class Gemma:
                 # 4xx will not fix itself, except 429 (rate limit) and 401:
                 # Fireworks intermittently returns spurious 401s under load,
                 # so give auth errors the full backoff before giving up.
-                status = getattr(e, "status_code", None)
                 if status is not None and 400 <= status < 500 and status not in (401, 429):
                     raise
                 if not isinstance(e, RETRIABLE) and "429" not in msg and "500" not in msg:
