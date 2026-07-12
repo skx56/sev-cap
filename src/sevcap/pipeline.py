@@ -46,7 +46,7 @@ log = logging.getLogger("sevcap.pipeline")
 
 POLISH_MIN_SCORE = 4
 POLISH_ENABLED = os.environ.get("SEVCAP_POLISH", "1") not in ("0", "false", "no")
-POLISH_MIN_REMAINING_S = 60.0
+POLISH_MIN_REMAINING_S = 45.0
 POLISH_MAX_ROUNDS = int(os.environ.get("SEVCAP_POLISH_ROUNDS", "2"))
 DOWNLOAD_WORKDIR = Path(os.environ.get("SEVCAP_DOWNLOAD_DIR", "/tmp/sevcap_tasks"))
 
@@ -192,18 +192,30 @@ async def _grounded_caption(
                 except Exception as e:  # noqa: BLE001
                     log.warning("[%s] polish score failed for %s: %s", task_id, style_key, str(e)[:80])
                     continue
+                # Reselect unless both axes are solid (failed prejudge returns 0).
                 if acc >= 4 and tone >= 4:
                     continue
-                # Only burn reselect budget on clearly weak captions.
-                if acc >= POLISH_MIN_SCORE and tone >= 3:
+                if acc == 0 and tone == 0:
+                    log.info("[%s] polish: prejudge failed for %s — forcing reselect", task_id, style_key)
+                elif acc >= POLISH_MIN_SCORE and tone >= 4:
                     continue
                 log.info("[%s] reselecting %s (acc=%d tone=%d)", task_id, style_key, acc, tone)
                 prior = [captions[k] for k in job.styles if k != style_key and captions.get(k)]
                 try:
+                    from .grounded import vision_style_caption
+
                     extra = await draft_style_candidates(
                         llm, description, STYLES[style_key], prior, formal_anchor or None,
                         include_safe=True,
                     )
+                    try:
+                        vcap = await vision_style_caption(
+                            llm, frames, description, STYLES[style_key], formal_anchor or None,
+                        )
+                        if vcap:
+                            extra.append(vcap)
+                    except Exception:  # noqa: BLE001
+                        pass
                     pool = [captions[style_key], *extra]
 
                     def _valid(cap: str, _key=style_key, _formal=formal_anchor) -> bool:
@@ -212,7 +224,11 @@ async def _grounded_caption(
                     best, new_acc, new_tone = await pick_best_candidate(
                         llm, str(video), style_key, pool, frames=frames, is_valid=_valid,
                     )
-                    if best and (new_acc > acc or (new_acc == acc and new_tone >= tone)):
+                    if best and (
+                        new_acc > acc
+                        or (new_acc == acc and new_tone >= tone)
+                        or (acc == 0 and new_acc > 0)
+                    ):
                         captions[style_key] = best
                         if style_key == "formal":
                             formal_anchor = best

@@ -63,7 +63,7 @@ Write a SHORT factual description (2 sentences max) of what is clearly visible:
 STRICT:
 - No city names, brands, product models, or dialogue unless unmistakably readable.
 - Prefer generic labels when unsure ("desktop computer", "city intersection").
-- Do not narrate camera artifacts (motion blur, "exits the frame", exposure).
+- Do NOT mention the camera, filming, aerial footage, zoom, pull-back, fade, or the clip ending.
 - Prefer specificity when clear ("golden ginkgo trees", "orange tabby kitten").
 Output ONLY the description text."""
 
@@ -75,8 +75,8 @@ Draft description:
 Correct against the frames:
 - Keep only clearly visible facts.
 - Remove brands/cities/product models/plot that are uncertain.
-- Remove camera-meta language (blur, frames, exits the frame).
-- Keep it to 2 tight sentences.
+- Remove ALL camera-meta (aerial, zoom, pull-back, fade, blur, "the clip", exits the frame).
+- Keep it to 2 tight sentences about subjects and setting only.
 Output ONLY the final description."""
 
 
@@ -136,28 +136,84 @@ async def verify_description(
 
 _STYLE_WRITE_HINTS = {
     "formal": (
-        "Write a professional caption: 1-2 sentences, about 18-40 words. "
-        "Restate the description precisely. No jokes, opinions, or camera talk."
+        "Write a professional caption: 1-2 sentences, about 18-45 words. "
+        "Restate the description precisely with concrete visible details. "
+        "No jokes, opinions, or camera talk."
     ),
     "sarcastic": (
         "Write ONE dry sarcastic sentence (12-26 words). "
         "Ironic praise or understatement about the PRIMARY subject/action. "
+        "Reuse concrete nouns from the description (colors, clothing, setting). "
         "Must sound sarcastic alone — not a formal paraphrase. No invented events."
     ),
     "humorous_tech": (
-        "Write ONE tech-humor sentence (14-30 words). "
-        "Map the PRIMARY visible subject/action to ONE tech metaphor "
-        "(deploy, retry, bug, agent, leaf nodes, staging). "
-        "Must be a joke grounded in what happens on screen. "
-        "Do not invent race conditions, memory leaks, seats-as-hardware, or extra plot. "
+        "Write ONE tech-humor sentence (14-28 words). "
+        "Reuse concrete visible nouns from the description, then map the PRIMARY "
+        "visible state/action to ONE tech metaphor (deploy, retry, bug, agent, staging). "
+        "The metaphor must NOT invent physical motion (rolling, crashing, collapsing) "
+        "that is not in the description. "
         "No frame/camera talk."
     ),
     "humorous_non_tech": (
-        "Write ONE everyday-humor sentence (12-28 words). "
-        "Personify or understate the PRIMARY subject/action. "
-        "No tech jargon. Funny, warm, no invented interactions."
+        "Write ONE everyday-humor sentence (12-26 words). "
+        "Reuse concrete visible nouns from the description. "
+        "Light personification or understatement of what is actually visible. "
+        "Do NOT invent clothing, body jokes, arguments, or secret plans. "
+        "No tech jargon."
     ),
 }
+
+_VISION_STYLE_PROMPT = """These {n} images are keyframes from the video.
+
+Verified description (facts you may use):
+{description}
+
+Write ONE {label} caption for this video.
+{hint}
+
+HARD:
+- Every concrete noun/action must be visible in the frames or description.
+- No invented plot, brands, cities, or camera-meta.
+- Output ONLY the caption text."""
+
+
+async def vision_style_caption(
+    llm: Gemma,
+    frames: list[Keyframe],
+    description: str,
+    style: StyleConfig,
+    formal_anchor: str | None = None,
+) -> str:
+    """Write a style caption while looking at frames — higher accuracy floor."""
+    kf = frames
+    if len(kf) > 4:
+        step = len(kf) / 4
+        kf = [kf[int(i * step)] for i in range(4)]
+    images = [f.b64() for f in kf]
+    hint = _STYLE_WRITE_HINTS.get(style.key, "Write one caption.")
+    if formal_anchor and style.key != "formal":
+        hint += f"\nFact checklist (reuse facts, not wording): {formal_anchor}"
+    prompt = _safe_format(
+        _VISION_STYLE_PROMPT,
+        n=len(images),
+        description=description.strip(),
+        label=style.label,
+        hint=hint,
+    )
+    last = ""
+    for attempt in range(2):
+        raw = await llm.vision_chat(
+            prompt, images,
+            temperature=0.35 + 0.15 * attempt,
+            max_tokens=140 if style.key != "formal" else 200,
+            tag=f"vision-write-{style.key}",
+            reasoning="none",
+            cache=False,
+        )
+        last = _clean_caption(raw)
+        if _style_ok(style.key, last, formal_anchor if style.key != "formal" else None, description):
+            return last
+    return last
 
 
 def _word_count(text: str) -> int:
@@ -185,6 +241,12 @@ _FOREIGN_BLOCK = {
 _META_WORDS = (
     "frame", "frames", "keyframe", "keyframes", "timestamp",
     "motion blur", "long-exposure", "exits the frame", "camera",
+    "aerial footage", "pulls back", "pull-back", "fades to black", "fade to black",
+    "the clip", "zooms", "zoom out", "zoom in",
+)
+_INVENTED_MOTION = (
+    "rolling back", "rolled back", "collapsing", "crashing", "exploding",
+    "falling apart", "breaking apart", "arguing", "staring contest",
 )
 
 
@@ -197,18 +259,45 @@ def _invents_foreign(caption: str, description: str) -> bool:
     for tok in _META_WORDS:
         if tok in low and tok not in desc:
             return True
+    for tok in _INVENTED_MOTION:
+        if tok in low and tok not in desc:
+            return True
     return False
+
+
+def _content_overlap(caption: str, description: str) -> float:
+    stop = {
+        "the", "a", "an", "and", "or", "with", "from", "into", "onto", "that",
+        "this", "its", "their", "then", "than", "while", "over", "under",
+    }
+    def toks(s: str) -> set[str]:
+        return {
+            w.lower().strip(".,;:!?\"'")
+            for w in s.replace("—", " ").split()
+            if len(w) > 3 and w.lower().strip(".,;:!?\"'") not in stop
+        }
+    ta, tb = toks(caption), toks(description)
+    if not ta or not tb:
+        return 0.0
+    return len(ta & tb) / max(1, len(ta))
 
 
 def _style_ok(style_key: str, caption: str, formal: str | None, description: str = "") -> bool:
     n = _word_count(caption)
     if style_key == "formal":
-        return 12 <= n <= 55
+        if not (12 <= n <= 55):
+            return False
+        if description and _invents_foreign(caption, description):
+            return False
+        return True
     if n > 34 or n < 8:
         return False
     if formal and _too_similar(caption, formal):
         return False
     if description and _invents_foreign(caption, description):
+        return False
+    # Humor must reuse enough visible nouns from the description (accuracy floor).
+    if style_key.startswith("humorous") and description and _content_overlap(caption, description) < 0.28:
         return False
     return True
 
@@ -394,8 +483,17 @@ async def caption_all_styles(
         style = STYLES[key]
         candidates = await draft_style_candidates(
             llm, description, style, prior, formal_anchor or None,
-            include_safe=False,
+            include_safe=(key != "formal"),
         )
+        if video and frames is not None:
+            try:
+                vcap = await vision_style_caption(
+                    llm, frames, description, style, formal_anchor or None,
+                )
+                if vcap:
+                    candidates.append(vcap)
+            except Exception:  # noqa: BLE001
+                pass
         if not candidates:
             candidates = [fallback if key == "formal" else (formal_anchor or fallback)]
 
@@ -403,10 +501,34 @@ async def caption_all_styles(
             def _valid(cap: str, _key=key, _formal=formal_anchor) -> bool:
                 return _style_ok(_key, cap, _formal if _key != "formal" else None, description)
 
-            best, _, _ = await pick_best_candidate(
+            best, best_acc, best_tone = await pick_best_candidate(
                 llm, video, key, candidates, frames=frames, is_valid=_valid,
             )
             cap = best or candidates[0]
+            # If still weak, force another vision write and re-pick.
+            if best_acc < 4 or best_tone < 4:
+                try:
+                    extra = await vision_style_caption(
+                        llm, frames, description, style, formal_anchor or None,
+                    )
+                    if extra and extra.strip().lower() != cap.strip().lower():
+                        pool = [cap, extra]
+                        if formal_anchor and key != "formal":
+                            try:
+                                pool.append(
+                                    await safe_style_caption(
+                                        llm, description, style, formal_anchor,
+                                    )
+                                )
+                            except Exception:  # noqa: BLE001
+                                pass
+                        better, a2, t2 = await pick_best_candidate(
+                            llm, video, key, pool, frames=frames, is_valid=_valid,
+                        )
+                        if better and (a2 > best_acc or (a2 == best_acc and t2 >= best_tone)):
+                            cap, best_acc, best_tone = better, a2, t2
+                except Exception:  # noqa: BLE001
+                    pass
         else:
             # No vision available: prefer first valid candidate.
             cap = next(
