@@ -1,5 +1,5 @@
 # SEV-Cap scoring container. Build for the harness with:
-#   docker buildx build --platform linux/amd64 -t ghcr.io/<you>/sev-cap:latest .
+#   docker buildx build --platform linux/amd64 -t ghcr.io/<you>/sevcap-grounded:latest .
 FROM python:3.11-slim
 
 RUN apt-get update \

@@ -11,7 +11,7 @@ humorous-non-tech** — optimized for the LLM judge’s two axes:
 
 | | |
 | --- | --- |
-| **Docker image** | `ghcr.io/skx56/sev-cap:latest` (linux/amd64) |
+| **Docker image** | `ghcr.io/skx56/sevcap-grounded:latest` (linux/amd64) |
 | **Repository** | <https://github.com/skx56/sev-cap> |
 | **Presentation** | [SEV-Cap-Presentation.pdf](SEV-Cap-Presentation.pdf) |
 
@@ -76,15 +76,18 @@ export FIREWORKS_API_KEY=fw_...
 ### Docker (what the scoring harness runs)
 
 ```bash
-docker buildx build --platform linux/amd64 -t ghcr.io/skx56/sev-cap:latest .
+docker buildx build --platform linux/amd64 -t ghcr.io/skx56/sevcap-grounded:latest .
 docker run --rm --platform linux/amd64 \
   -e FIREWORKS_API_KEY=fw_... \
   -v "$PWD/sample_input:/input:ro" -v "$PWD/results:/output" \
-  ghcr.io/skx56/sev-cap:latest
+  ghcr.io/skx56/sevcap-grounded:latest
 ```
 
 Expects `/input/tasks.json` and writes `/output/results.json`. Audio ASR is
 off by default (`SEVCAP_AUDIO=0`); scoring is vision-grounded.
+
+**Submit this image URI to the harness:** `ghcr.io/skx56/sevcap-grounded:latest`
+(not the old `ghcr.io/skx56/sev-cap:latest` package).
 
 ### Useful commands
 
@@ -104,10 +107,9 @@ See [.env.example](.env.example): `SEVCAP_CANDIDATES`, `SEVCAP_POLISH`,
 ## Tech stack
 
 **Kimi K2.6** (default) · Fireworks AI · Python 3.11 · asyncio · ffmpeg ·
-Docker (linux/amd64) · GitHub Actions → ghcr.io · Streamlit (optional demo)
+Docker (linux/amd64) · GitHub Actions → ghcr.io
 
-## Docs kept for submission
+## Docs
 
 - [SEV-Cap-Presentation.pdf](SEV-Cap-Presentation.pdf)
 - [docs/slides.md](docs/slides.md), [docs/submission.md](docs/submission.md)
-- [demo/app.py](demo/app.py) — local upload demo of the same pipeline
