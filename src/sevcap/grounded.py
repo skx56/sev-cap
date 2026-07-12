@@ -23,8 +23,7 @@ _META_RE = re.compile(
 )
 
 # How many candidates to draft per style before vision selection.
-# 2 keeps quality high while staying inside harness time budgets.
-N_CANDIDATES = int(os.environ.get("SEVCAP_CANDIDATES", "2"))
+N_CANDIDATES = int(os.environ.get("SEVCAP_CANDIDATES", "3"))
 
 
 def _safe_format(template: str, **kwargs: str | int) -> str:

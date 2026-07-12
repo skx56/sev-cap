@@ -1,9 +1,4 @@
-"""Keyframe sampling with ffmpeg: uniform coverage + scene-change frames.
-
-Uniform frames guarantee temporal coverage of slow/static clips; the
-scene-change pass catches cuts and fast action that uniform sampling misses.
-The union (deduped, time-ordered) is what Stage 1 sees.
-"""
+"""Keyframe sampling with ffmpeg: uniform coverage + scene-change frames."""
 
 from __future__ import annotations
 

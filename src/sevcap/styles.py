@@ -1,17 +1,9 @@
-"""The four caption styles: definitions, rules and hand-tuned exemplars.
-
-Exemplars share three scenarios across all styles so the blind-lineup test
-measures pure style separability, not content differences. Each style has an
-explicit anti-pattern list — the failure modes the LLM-Judge will punish
-("sarcastic" that is merely declarative-with-attitude, "humorous" that is a
-description with an exclamation mark).
-"""
+"""The four Track 2 caption styles: rules and few-shot exemplars."""
 
 from __future__ import annotations
 
 from dataclasses import dataclass, field
 
-# Shared exemplar fact sheets (what Stage 1 would have verified).
 _FACTS_DOG = (
     "OBJECTS:\n- a brown dog\n- a yellow tennis ball\n- a shallow pond\n"
     "SETTING:\n- a public park with grass\nEVENTS:\n- the dog chases the thrown ball\n"
@@ -37,7 +29,7 @@ class StyleConfig:
     rules: list[str]
     anti_patterns: list[str]
     temperature: float
-    exemplars: list[tuple[str, str]] = field(default_factory=list)  # (facts, caption)
+    exemplars: list[tuple[str, str]] = field(default_factory=list)
 
 
 STYLES: dict[str, StyleConfig] = {

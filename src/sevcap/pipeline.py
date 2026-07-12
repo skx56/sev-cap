@@ -1,10 +1,7 @@
 """Anytime orchestrator — grounded describe → verify → style-write pipeline.
 
-Phase 1 writes placeholder output immediately. Phase 2 runs the Raccoon-style
-grounded path (describe frames, self-verify, write 4 styles from one shared
-description) plus a light accuracy polish pass. Simple and reliable: ~10 LLM
-calls/clip instead of 30+ through semantic-entropy gates that often fell back
-to unverified drafts.
+Describe frames, self-verify, write multi-candidate captions per style, then
+vision-prejudge on accuracy + tone (Track 2 axes) with a polish/reselect pass.
 """
 
 from __future__ import annotations
@@ -38,7 +35,6 @@ from .io_contract import (
     list_videos,
     load_tasks,
 )
-from .prejudge import score_caption_accuracy  # noqa: F401  # public re-export for tests
 from .sampler import probe_duration, sample_keyframes
 from .styles import STYLE_ORDER, STYLES
 
@@ -47,7 +43,6 @@ log = logging.getLogger("sevcap.pipeline")
 POLISH_MIN_SCORE = 4
 POLISH_ENABLED = os.environ.get("SEVCAP_POLISH", "1") not in ("0", "false", "no")
 POLISH_MIN_REMAINING_S = 45.0
-POLISH_MAX_ROUNDS = int(os.environ.get("SEVCAP_POLISH_ROUNDS", "2"))
 DOWNLOAD_WORKDIR = Path(os.environ.get("SEVCAP_DOWNLOAD_DIR", "/tmp/sevcap_tasks"))
 
 

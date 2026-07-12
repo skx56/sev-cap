@@ -36,9 +36,6 @@ def test_result_writer_per_clip_and_combined(tmp_path):
     assert "verification" not in harness[0]
     assert harness[1]["captions"]["formal"] == "f2"
 
-    legacy = json.loads((tmp_path / "captions.json").read_text())
-    assert legacy["results"][0]["clip"] == "clip1"
-
     # overwrite is atomic and replaces the record
     w.write("clip1", {"formal": "better", "sarcastic": "s",
                       "humorous_tech": "ht", "humorous_non_tech": "hnt"})

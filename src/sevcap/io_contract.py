@@ -370,13 +370,6 @@ class ResultWriter:
 
     def _flush(self, task_id: str, record: dict, meta: dict | None) -> None:
         harness_results = self._ordered_results()
-        legacy = {
-            "results": [
-                {"clip": rec["task_id"], "captions": rec["captions"]}
-                for rec in harness_results
-            ]
-        }
-        flat = {rec["task_id"]: rec["captions"] for rec in harness_results}
         debug_record = dict(record)
         if meta:
             debug_record["verification"] = meta
@@ -385,9 +378,6 @@ class ResultWriter:
             try:
                 atomic_write_json(out_dir / "results.json", harness_results)
                 atomic_write_json(out_dir / f"{task_id}.json", debug_record)
-                atomic_write_json(out_dir / "captions.json", legacy)
-                atomic_write_json(out_dir / "submission.json", legacy)
-                atomic_write_json(out_dir / "predictions.json", flat)
             except OSError as e:
                 log.warning("failed writing output mirror %s: %s", out_dir, str(e)[:120])
         log.info(

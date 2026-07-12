@@ -5,8 +5,6 @@ __pycache__/
 .env
 .sevcap_cache/
 results/
-clips/*
-!clips/.gitkeep
 eval/out/
 .pytest_cache/
 dist/

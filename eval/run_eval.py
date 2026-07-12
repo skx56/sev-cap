@@ -1,9 +1,8 @@
-"""Run the pipeline over clips/ and grade the results with the internal judge.
+"""Grade harness results.json with the internal accuracy+tone judge.
 
 Usage:
-    FIREWORKS_API_KEY=... .venv/bin/python eval/run_eval.py [--skip-pipeline]
-
-Response caching (.sevcap_cache/) makes reruns free while tuning thresholds.
+  FIREWORKS_API_KEY=... python eval/run_eval.py \\
+    --results /path/to/results.json --videos /tmp/sevcap_tasks
 """
 
 from __future__ import annotations
@@ -23,53 +22,43 @@ from sevcap.fireworks import Gemma  # noqa: E402
 
 async def main() -> int:
     ap = argparse.ArgumentParser()
-    ap.add_argument("--clips", default="clips")
-    ap.add_argument("--results", default="results")
-    ap.add_argument("--skip-pipeline", action="store_true",
-                    help="grade existing results/ without rerunning the pipeline")
+    ap.add_argument("--results", required=True, help="Path to results.json")
+    ap.add_argument(
+        "--videos",
+        required=True,
+        help="Directory with {task_id}.mp4 files",
+    )
     args = ap.parse_args()
 
-    if not args.skip_pipeline:
-        from sevcap.pipeline import run
-        await run(args.clips, args.results)
+    data = json.loads(Path(args.results).read_text())
+    if not isinstance(data, list):
+        raise SystemExit("results.json must be a JSON array")
 
     llm = Gemma()
     await llm.resolve_text_model()
-    results_dir = Path(args.results)
+    videos = Path(args.videos)
     rows = []
-    for f in sorted(results_dir.glob("*.json")):
-        if f.name == "captions.json":
+    print(f"{'clip':6} {'style':20} {'acc':>4} {'tone':>4}")
+    for row in data:
+        tid = row["task_id"]
+        video = videos / f"{tid}.mp4"
+        if not video.exists():
+            print(f"{tid} missing video {video}")
             continue
-        rec = json.loads(f.read_text())
-        video = next(Path(args.clips).glob(f"{rec['clip']}.*"), None)
-        if not video:
-            continue
-        try:
-            scores = await judge_clip(llm, str(video), rec["captions"])
-            rows.append((rec["clip"], scores))
-        except Exception as e:  # noqa: BLE001
-            print(f"judge failed for {rec['clip']}: {str(e)[:150]}")
-
-    print(f"\n{'clip':24} {'style':18} {'acc':>4} {'tone':>4}")
-    accs, tones = [], []
-    for clip, scores in rows:
+        scores = await judge_clip(llm, str(video), row["captions"])
+        rows.append((tid, scores))
         for style, s in scores.items():
             a, t = s.get("accuracy", 0), s.get("tone", 0)
-            accs.append(a)
-            tones.append(t)
             flag = "  <-- weak" if min(a, t) <= 3 else ""
-            print(f"{clip:24} {style:18} {a:>4} {t:>4}{flag}")
-    if accs:
-        print(f"\nmean accuracy {statistics.mean(accs):.2f}  "
-              f"mean tone {statistics.mean(tones):.2f}  "
-              f"(n={len(accs)} captions, {len(rows)} clips)")
-        combined = (statistics.mean(accs) + statistics.mean(tones)) / 10
-        print(f"combined (leaderboard-style 0-1): {combined:.2f}")
-    out = Path("eval/out")
-    out.mkdir(parents=True, exist_ok=True)
-    (out / "eval_scores.json").write_text(json.dumps(
-        {clip: scores for clip, scores in rows}, indent=2))
-    print(f"llm usage: {llm.usage.summary()}")
+            print(f"{tid:6} {style:20} {a:>4} {t:>4}{flag}")
+
+    all_a = [s.get("accuracy", 0) for _, sc in rows for s in sc.values()]
+    all_t = [s.get("tone", 0) for _, sc in rows for s in sc.values()]
+    if all_a:
+        combined = (statistics.mean(all_a) + statistics.mean(all_t)) / 10
+        print(f"\nmean accuracy {statistics.mean(all_a):.2f}")
+        print(f"mean tone     {statistics.mean(all_t):.2f}")
+        print(f"combined      {combined:.3f}  (n={len(all_a)} captions, {len(rows)} clips)")
     return 0
 
 

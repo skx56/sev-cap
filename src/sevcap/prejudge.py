@@ -1,7 +1,7 @@
 """Lightweight vision judge for caption candidate selection.
 
-Scores both accuracy and style tone so we can pick captions that raise the
-leaderboard-style average (acc+tone)/10, not accuracy alone.
+Scores accuracy and style tone so we pick captions that raise the Track 2
+leaderboard average (acc + tone) / 10.
 """
 
 from __future__ import annotations
@@ -68,7 +68,6 @@ async def score_caption_axes(
     kf = frames or sample_keyframes(
         video, clip_profile(probe_duration(video)).n_frames,
     )
-    # Keep prejudge cheap: at most 4 evenly spaced frames.
     if len(kf) > 4:
         step = len(kf) / 4
         kf = [kf[int(i * step)] for i in range(4)]
@@ -82,8 +81,6 @@ async def score_caption_axes(
                 prompt,
                 images,
                 temperature=0.0 if attempt == 0 else 0.2,
-                # Kimi often emits a short preamble even with reasoning=none;
-                # keep enough room for the JSON answer.
                 max_tokens=800 if attempt == 0 else 1200,
                 tag="prejudge",
                 reasoning="none",
@@ -95,22 +92,13 @@ async def score_caption_axes(
             last_err = e
             continue
     log.warning("prejudge failed for %s: %s", style, str(last_err)[:100])
-    # Do NOT return a fake mid-score — it makes every candidate look equal.
     return 0, 0
-
-
-async def score_caption_accuracy(
-    llm: Gemma, video: str, style: str, caption: str, frames=None,
-) -> int:
-    acc, _ = await score_caption_axes(llm, video, style, caption, frames=frames)
-    return acc
 
 
 def combined_rank(acc: int, tone: int) -> float:
     """Leaderboard-style rank; accuracy floor matters more for gate risk."""
     if acc <= 0 and tone <= 0:
         return -10.0
-    # Strongly prefer accuracy ≥4 — one weak accuracy caption tanks the average.
     return (
         (acc + tone) / 2.0
         + (0.55 if acc >= 5 else 0.35 if acc >= 4 else -0.4)
@@ -149,31 +137,9 @@ async def pick_best_candidate(
 
     scored.sort(key=lambda x: (x[4], x[3], x[1], x[2]), reverse=True)
     best = scored[0]
-    # If every prejudge call failed, keep the first valid candidate with neutral scores.
     if best[1] <= 0 and best[2] <= 0:
         for cap, acc, tone, _rank, valid in scored:
             if valid:
                 return cap, 3, 3
         return uniq[0], 3, 3
     return best[0], best[1], best[2]
-
-
-async def pick_better_caption(
-    llm: Gemma,
-    video: str,
-    style: str,
-    draft_cap: str,
-    sev_cap: str,
-    frames=None,
-) -> tuple[str, dict]:
-    """Return the more accurate caption and score metadata."""
-    if not sev_cap or sev_cap.strip() == draft_cap.strip():
-        return draft_cap, {"picked": "draft", "draft": None, "sev": None}
-    (d_acc, d_tone), (s_acc, s_tone) = await asyncio.gather(
-        score_caption_axes(llm, video, style, draft_cap, frames=frames),
-        score_caption_axes(llm, video, style, sev_cap, frames=frames),
-    )
-    meta = {"draft": d_acc, "sev": s_acc, "draft_tone": d_tone, "sev_tone": s_tone}
-    if combined_rank(s_acc, s_tone) > combined_rank(d_acc, d_tone):
-        return sev_cap, {**meta, "picked": "sev"}
-    return draft_cap, {**meta, "picked": "draft"}
