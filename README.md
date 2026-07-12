@@ -45,12 +45,22 @@ Submit: **`ghcr.io/skx56/sevcap-grounded:latest`**
 
 ```
 src/sevcap/     scoring pipeline
+demo/           Streamlit upload UI (optional)
 sample_input/   official-style tasks.json
 eval/           internal judge
-scripts/        harness schema validator
+scripts/        harness schema validator + deck generator
 docs/           submission notes + slides
 Dockerfile      linux/amd64 scoring image
 ```
+
+### Local demo UI
+
+```bash
+.venv/bin/pip install -e ".[demo]"
+.venv/bin/streamlit run demo/app.py --server.port 7860
+```
+
+Uses the same production pipeline as the Docker image (not a mock).
 
 ## Config
 
