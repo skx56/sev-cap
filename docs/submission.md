@@ -7,8 +7,7 @@ SEV-Cap: Grounded Multi-Style Video Captioning
 ## Short description
 
 Four-style video captions (formal, sarcastic, humorous-tech, humorous-non-tech)
-via describe → verify → multi-candidate write with vision pre-scoring on
-accuracy and tone.
+via describe → verify → style generation.
 
 ## Container
 

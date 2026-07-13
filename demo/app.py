@@ -5,7 +5,6 @@ Local:
 """
 from __future__ import annotations
 
-import asyncio
 import json
 import logging
 import os
@@ -19,10 +18,11 @@ from pathlib import Path
 import streamlit as st
 
 ROOT = Path(__file__).resolve().parent.parent
-sys.path.insert(0, str(ROOT / "src"))
+sys.path.insert(0, str(ROOT))
 
 MAX_UPLOAD_MB = int(os.environ.get("SEVCAP_DEMO_MAX_UPLOAD_MB", "1024"))
 COMPRESS_ABOVE_MB = int(os.environ.get("SEVCAP_DEMO_COMPRESS_ABOVE_MB", "80"))
+STYLE_ORDER = ["formal", "sarcastic", "humorous_tech", "humorous_non_tech"]
 
 
 def _load_secrets() -> None:
@@ -30,7 +30,10 @@ def _load_secrets() -> None:
         if "FIREWORKS_API_KEY" in st.secrets:
             os.environ.setdefault("FIREWORKS_API_KEY", str(st.secrets["FIREWORKS_API_KEY"]))
         for k, v in st.secrets.items():
-            if isinstance(v, str) and k.startswith("SEVCAP_"):
+            if isinstance(v, str) and (
+                k.startswith("SEVCAP_")
+                or k in {"FIREWORKS_VISION_MODEL", "FIREWORKS_TEXT_MODEL", "AUTO_TRANSCRIBE"}
+            ):
                 os.environ.setdefault(k, v)
     except Exception:  # noqa: BLE001
         pass
@@ -46,17 +49,15 @@ def _load_secrets() -> None:
 
 _load_secrets()
 
-from sevcap.fireworks import Gemma  # noqa: E402
-from sevcap.io_contract import ResultWriter  # noqa: E402
-from sevcap.pipeline import ClipJob, Deadline, process_clip  # noqa: E402
-from sevcap.styles import STYLE_ORDER  # noqa: E402
+from agent import process_single_task  # noqa: E402
+from config import Config  # noqa: E402
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(name)s %(levelname)s %(message)s")
 log = logging.getLogger("sevcap.demo")
 
-DEMO_BUDGET_S = float(os.environ.get("SEVCAP_DEMO_BUDGET", "600"))
 OUT_DIR = Path(__file__).resolve().parent / "out" / "results"
 OUT_DIR.mkdir(parents=True, exist_ok=True)
+
 
 STYLES = [
     ("formal", "Formal", "Clear. Precise. Archival."),
@@ -67,14 +68,13 @@ STYLES = [
 
 
 @st.cache_resource
-def _get_llm() -> Gemma:
-    llm = Gemma()
+def _warm() -> bool:
     try:
-        asyncio.run(llm.resolve_text_model())
-        asyncio.run(llm.check_vision())
+        Config.validate()
     except Exception as e:  # noqa: BLE001
-        log.warning("model warm-up failed: %s", e)
-    return llm
+        log.warning("config warm-up: %s", e)
+        return False
+    return True
 
 
 def _save_upload(uploaded, dest: Path) -> int:
@@ -108,32 +108,23 @@ def _compress_for_demo(src: Path, dest: Path) -> Path:
     return dest
 
 
-async def _caption(video_path: Path) -> tuple[dict[str, str], dict]:
-    work = Path(tempfile.mkdtemp(prefix="sevcap_demo_"))
+def _caption(video_path: Path) -> tuple[dict[str, str], dict]:
+    _warm()
+    t0 = time.monotonic()
+    result = process_single_task({
+        "task_id": video_path.stem,
+        "video_url": str(video_path),
+        "styles": list(STYLE_ORDER),
+    })
+    elapsed = time.monotonic() - t0
+    caps = result.get("captions") or {}
     try:
-        dest = work / f"upload{video_path.suffix or '.mp4'}"
-        shutil.copy2(video_path, dest)
-        llm = _get_llm()
-        writer = ResultWriter(OUT_DIR, task_order=[dest.stem])
-        deadline = Deadline(DEMO_BUDGET_S)
-        job = ClipJob(task_id=dest.stem, styles=list(STYLE_ORDER), video=dest)
-        t0 = time.monotonic()
-        result = await process_clip(llm, job, writer, deadline)
-        elapsed = time.monotonic() - t0
-        rec_path = OUT_DIR / f"{dest.stem}.json"
-        if not rec_path.exists():
-            return {}, {"error": f"No output written ({result})"}
-        rec = json.loads(rec_path.read_text())
-        caps = rec.get("captions") or {}
-        meta = rec.get("verification") or {}
-        return caps, {
-            "elapsed": elapsed,
-            "stage": meta.get("stage") or result.get("stage", "?"),
-            "description": (meta.get("grounding_description") or "")[:700],
-            "keyframes": meta.get("keyframes"),
-        }
-    finally:
-        shutil.rmtree(work, ignore_errors=True)
+        (OUT_DIR / f"{video_path.stem}.json").write_text(
+            json.dumps(result, indent=2), encoding="utf-8"
+        )
+    except Exception:  # noqa: BLE001
+        pass
+    return caps, {"elapsed": elapsed, "stage": "ok"}
 
 
 CSS = """
@@ -234,7 +225,7 @@ def main() -> None:
         st.error("FIREWORKS_API_KEY is missing. Add it in Streamlit secrets or a local `.env`.")
         st.stop()
 
-    st.markdown('<div class="tag">Track 2 · Video Captioning</div>', unsafe_allow_html=True)
+    st.markdown('<div class="tag">Video Captioning</div>', unsafe_allow_html=True)
     st.markdown('<div class="brand">SEV-Cap</div>', unsafe_allow_html=True)
     st.markdown(
         '<div class="lede">Four grounded captions from one clip — formal, sarcastic, '
@@ -339,9 +330,9 @@ def main() -> None:
                     st.error(str(e))
                     return
 
-            st.write("Sampling keyframes → describe/verify → multi-candidate captions")
+            st.write("Sampling keyframes → describe/verify → style captions")
             try:
-                caps, info = asyncio.run(_caption(video_for_pipeline))
+                caps, info = _caption(video_for_pipeline)
             except Exception as e:  # noqa: BLE001
                 status.update(label="Pipeline error", state="error", expanded=True)
                 st.error(str(e))

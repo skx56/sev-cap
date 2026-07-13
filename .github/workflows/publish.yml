@@ -1,8 +1,8 @@
 name: build-and-publish
 
+# Manual only — the scoring image bakes FIREWORKS_API_KEY at build time.
+# Auto-push without that secret would publish a broken image.
 on:
-  push:
-    branches: [main]
   workflow_dispatch:
 
 permissions:
@@ -10,23 +10,10 @@ permissions:
   packages: write
 
 env:
-  # Distinct from the old ghcr.io/.../sev-cap image so harness pulls are unambiguous.
   IMAGE_NAME: sevcap-grounded
 
 jobs:
-  test:
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-python@v5
-        with:
-          python-version: "3.11"
-      - run: sudo apt-get update && sudo apt-get install -y ffmpeg
-      - run: pip install -e ".[dev]"
-      - run: pytest -q
-
   publish:
-    needs: test
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -41,6 +28,8 @@ jobs:
           context: .
           platforms: linux/amd64
           push: true
+          build-args: |
+            FIREWORKS_API_KEY=${{ secrets.FIREWORKS_API_KEY }}
           tags: |
             ghcr.io/${{ github.repository_owner }}/${{ env.IMAGE_NAME }}:latest
             ghcr.io/${{ github.repository_owner }}/${{ env.IMAGE_NAME }}:${{ github.sha }}

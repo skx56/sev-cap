@@ -1,71 +1,45 @@
-# SEV-Cap — Grounded Multi-Style Video Captioning
+# SEV-Cap — multi-style video captioning (AMD Track 2)
 
-Track 2 video captioning: four styles (**formal, sarcastic, humorous_tech,
-humorous_non_tech**) optimized for the LLM judge’s **accuracy** and **tone**.
+Dockerized agent: reads `/input/tasks.json`, writes `/output/results.json`
+with four captions per clip (`formal`, `sarcastic`, `humorous_tech`,
+`humorous_non_tech`).
 
-| | |
-| --- | --- |
-| **Docker image** | `ghcr.io/skx56/sevcap-grounded:latest` (linux/amd64) |
-| **Repository** | <https://github.com/skx56/sev-cap> |
-| **Presentation** | [SEV-Cap-Presentation.pdf](SEV-Cap-Presentation.pdf) |
+## Approach
 
-## Scoring path (what the image runs)
+1. Sample a small set of keyframes (3–6 by duration)
+2. Vision model writes a structured scene brief, then verifies it
+3. Text model writes the four styles sequentially with light style checks
 
-1. Read `/input/tasks.json`, download/resolve each video
-2. Sample keyframes (ffmpeg)
-3. **Describe → verify** one shared scene description
-4. Draft **multi-candidate** captions per style (+ vision-grounded drafts)
-5. **Vision prejudge** on accuracy + tone; pick the best
-6. Polish/reselect any weak styles
-7. Write `/output/results.json` (`[{task_id, captions}, ...]`)
+## Docker image
 
-Tuned against the official AMD sample-style clips; internal judge combined
-score **0.966** (`(mean_acc + mean_tone) / 10`).
-
-## Quick start
-
-```bash
-git clone https://github.com/skx56/sev-cap && cd sev-cap
-python3 -m venv .venv && .venv/bin/pip install -e ".[dev]"
-export FIREWORKS_API_KEY=fw_...
-.venv/bin/sevcap check
-```
+`ghcr.io/skx56/sevcap-grounded:latest` (linux/amd64)
 
 ```bash
 docker pull --platform linux/amd64 ghcr.io/skx56/sevcap-grounded:latest
-docker run --rm --platform linux/amd64 \
-  -e FIREWORKS_API_KEY=fw_... \
-  -v "$PWD/sample_input:/input:ro" -v "$PWD/results:/output" \
+docker run --rm \
+  -v "$PWD/input:/input:ro" \
+  -v "$PWD/output:/output" \
   ghcr.io/skx56/sevcap-grounded:latest
 ```
 
-Submit: **`ghcr.io/skx56/sevcap-grounded:latest`**
+Defaults: MiniMax M3 (vision) + Kimi K2.6 (captions), ASR off, concurrency 3.
 
-## Repo layout
-
-```
-src/sevcap/     scoring pipeline
-demo/           Streamlit upload UI (optional)
-sample_input/   official-style tasks.json
-eval/           internal judge
-scripts/        harness schema validator + deck generator
-docs/           submission notes + slides
-Dockerfile      linux/amd64 scoring image
-```
-
-### Local demo UI
+## Demo (Streamlit)
 
 ```bash
-.venv/bin/pip install -e ".[demo]"
-.venv/bin/streamlit run demo/app.py --server.port 7860
+export FIREWORKS_API_KEY=fw_...
+pip install -r requirements.txt
+streamlit run demo/app.py
 ```
 
-Uses the same production pipeline as the Docker image (not a mock).
+Or open the hosted Streamlit app linked to this repo (Community Cloud).
+Set `FIREWORKS_API_KEY` in Streamlit secrets.
 
-**Streamlit Cloud:** deploy this repo, set main file to `demo/app.py`, add secret
-`FIREWORKS_API_KEY`, and ensure `packages.txt` installs `ffmpeg`.
+## Local harness
 
-## Config
-
-See [.env.example](.env.example). Image defaults: `SEVCAP_CANDIDATES=3`,
-`SEVCAP_POLISH=1`, `SEVCAP_AUDIO=0`, Kimi K2.6 on Fireworks.
+```bash
+export FIREWORKS_API_KEY=fw_...
+export INPUT_PATH=./sample_input/tasks.json
+export OUTPUT_PATH=./out/results.json
+python agent.py
+```
