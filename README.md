@@ -25,6 +25,20 @@ SEV-Cap focuses on one of the hardest parts of automated captioning: making gene
 
 The pipeline is split into extraction, transcription, analysis, captioning, and validation modules. Pydantic schemas define data contracts between stages, while the Streamlit app provides a thin interface over the core pipeline.
 
+## Architecture Diagram
+
+```mermaid
+flowchart LR
+  Video["Video Input"] --> Extract["Frame and Audio Extraction"]
+  Extract --> Transcribe["Speech Transcription"]
+  Extract --> Analyze["Visual Analysis"]
+  Transcribe --> Caption["Caption Generation"]
+  Analyze --> Caption
+  Caption --> Schemas["Pydantic Validation"]
+  Schemas --> Streamlit["Streamlit Review App"]
+  Schemas --> Output["Multi-Style Captions"]
+```
+
 ## Technology Stack
 
 - Python 3.11 project with pyproject configuration.
